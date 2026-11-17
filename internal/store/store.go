@@ -27,16 +27,16 @@ const (
 	// MaxPage 是单站点最大页数上限。
 	MaxPage = 2500
 
-	DefaultMaxItems   = 10000                  // 映射与导出接口的默认条数上限
-	maxItemsPerPage   = 1000                   // 单页最多接受的条目数，防上游异常
-	maxActivePages    = 5                      // 定时刷新只覆盖最近访问的页数
-	maxFillPages      = 6                      // 单次窗口请求最多顺延抓取的列表页数
-	ListFetchGap      = 150 * time.Millisecond // 连续抓列表页之间的间隔（默认值）
-	windowWait        = 20 * time.Second       // 窗口内直链解析的最长等待
-	MaxWindowSize     = 500                    // 单次窗口最多返回的条数
-	siteFailsCooldown = 3                      // 站点连续失败多少次触发熔断
-	siteCooldown      = 30 * time.Minute       // 首次熔断的冷却时长
-	maxDeepPages      = 30                     // 单站点默认最多深挖到第几页（防打爆上游）
+	DefaultMaxItems     = 10000                  // 映射与导出接口的默认条数上限
+	maxItemsPerPage     = 1000                   // 单页最多接受的条目数，防上游异常
+	maxFillPages        = 6                      // 单次窗口请求最多顺延抓取的列表页数
+	ListFetchGap        = 150 * time.Millisecond // 连续抓列表页之间的间隔（默认值）
+	windowWait          = 20 * time.Second       // 窗口内直链解析的最长等待
+	MaxWindowSize       = 500                    // 单次窗口最多返回的条数
+	siteFailsCooldown   = 3                      // 站点连续失败多少次触发熔断
+	siteCooldown        = 30 * time.Minute       // 首次熔断的冷却时长
+	maxDeepPages        = 30                     // 单站点默认最多深挖到第几页（防打爆上游）
+	maxIncrementalPages = 5                      // 增量同步最多往下翻几页（未追平本地时）
 )
 
 // Item 是 provider.Item 的别名，调用方无需同时引入两个包。
@@ -85,9 +85,8 @@ type pageState struct {
 	ids         []string // 存储的是完整 itemKey
 	lastList    time.Time
 	lastAttempt int64 // 上次尝试完成时间（Unix 纳秒）
-	lastUsed    time.Time
-	empty       bool // 上游该页返回空列表，说明再深也没内容
-	fails       int  // 连续失败次数
+	empty       bool  // 上游该页返回空列表，说明再深也没内容
+	fails       int   // 连续失败次数
 	lastErr     string
 }
 
@@ -182,12 +181,12 @@ func (st *siteState) onFailure(err string) (cooling bool, cooldown time.Duration
 type Options struct {
 	File      string            // 映射文件路径
 	ListTTL   time.Duration     // 列表同步间隔
-	VideoTTL  time.Duration     // 直链有效期，超时后换新签名
 	Keep      time.Duration     // 下架映射保留时长，0 表示永久
 	Workers   int               // 详情解析并发数
 	MaxItems  int               // 映射最大条数
 	DeepPages int               // 单站点最多深挖到第几页（0 = 默认 30）
 	ListGap   time.Duration     // 同站点连续列表请求间隔（0=默认 150ms，负数=禁用）
+	Lazy      bool              // 懒加载：只抓列表，直链等播放时按需解析
 	Provider  provider.Provider // 默认站点（单站部署）
 	// Providers 是全部站点；为空时退化为只有 Provider。
 	Providers []provider.Provider
@@ -203,16 +202,18 @@ type Options struct {
 //	listMu    串行化列表页请求，并保证请求之间有间隔
 //	pageMu    保护 pageLock 映射本身
 //	pageLock  每页一把，保证同一上游页不会被并发抓取
+//	detailMu  保护 detailLock 映射本身
+//	detailLock 每条一把，保证同一条目不会被并发重解析（后台队列与按需修复互斥）
 //	saveMu    串行化落盘
 type Store struct {
 	file      string
 	listTTL   time.Duration
-	videoTTL  time.Duration
 	keep      time.Duration
 	workers   int
 	maxItems  int
 	deepPages int           // 深挖页数上限，0 表示用默认值
 	listGap   time.Duration // 同站点连续列表请求的最小间隔
+	lazy      bool          // 懒加载：默认不主动抓详情，等播放时按需解析
 
 	sites   []provider.Provider          // 按注册顺序，决定列表展示顺序
 	byName  map[string]provider.Provider // 站名 → 实现
@@ -243,6 +244,11 @@ type Store struct {
 
 	pageMu   sync.Mutex
 	pageLock map[string]*sync.Mutex
+
+	detailMu   sync.Mutex
+	detailLock map[string]*sync.Mutex
+	flights    map[string]*repairFlight
+	recent     map[string]recentRepair
 
 	saveMu sync.Mutex
 }
@@ -279,11 +285,11 @@ func New(opt Options) *Store {
 	return &Store{
 		file:         opt.File,
 		listTTL:      opt.ListTTL,
-		videoTTL:     opt.VideoTTL,
 		keep:         opt.Keep,
 		workers:      opt.Workers,
 		maxItems:     opt.MaxItems,
 		deepPages:    opt.DeepPages,
+		lazy:         opt.Lazy,
 		sites:        sites,
 		byName:       byName,
 		defSite:      def,
@@ -296,6 +302,9 @@ func New(opt Options) *Store {
 		syncing:      make(map[string]bool),
 		syncReq:      make(map[string]bool),
 		pageLock:     make(map[string]*sync.Mutex),
+		detailLock:   make(map[string]*sync.Mutex),
+		flights:      make(map[string]*repairFlight),
+		recent:       make(map[string]recentRepair),
 		limiters:     make(map[string]*fetchLimiter),
 		queue:        make(chan string, 8192),
 		wake:         make(chan struct{}, 64),
@@ -328,9 +337,6 @@ func (s *Store) MaxItems() int { return s.maxItems }
 
 // ListTTL 返回列表同步间隔。
 func (s *Store) ListTTL() time.Duration { return s.listTTL }
-
-// VideoTTL 返回直链有效期。
-func (s *Store) VideoTTL() time.Duration { return s.videoTTL }
 
 // orderOfLocked 返回某站点的展示队列（首次调用时创建）。调用方需持有 s.mu。
 func (s *Store) orderOfLocked(site string) *orderQueue {
@@ -391,8 +397,26 @@ func needsDetail(it *Item, now time.Time) bool {
 	return it.RetryAt <= now.Unix()
 }
 
+// NeedsDetail 判断条目是否需要（重新）解析详情；懒加载模式下恒为 false。
+//
+// 懒加载时列表只负责「抓出来显示」，直链一律留空，等用户真的点了播放
+// （Repair）再去请求上游。这样可以避免列表一刷新就打几百次详情接口被风控。
+func (s *Store) NeedsDetail(it *Item, now time.Time) bool {
+	if s.lazy {
+		return false
+	}
+	return needsDetail(it, now)
+}
+
+// Lazy 返回是否处于懒加载模式（只抓列表，不主动抓详情）。
+func (s *Store) Lazy() bool { return s.lazy }
+
 // enqueueLocked 把 itemKey 放入详情队列（去重）。调用方需持有 s.mu。
+// 懒加载模式下不入队：直链留给播放时的按需解析。
 func (s *Store) enqueueLocked(key string) {
+	if s.lazy {
+		return
+	}
 	if s.pending[key] {
 		return
 	}

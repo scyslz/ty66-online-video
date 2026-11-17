@@ -126,42 +126,113 @@ func (s *Store) Stats() (items, pages, pending int, lastList time.Time) {
 	return len(s.items), len(s.pages), len(s.pending), lastList
 }
 
-// RefreshStale 把需要更新的条目重新入队，由详情线程处理：
-//   - 直链临近过期（换新签名）
-//   - 只有网页播放页、还没挖出直链
-//   - 之前解析失败且已到重试时间（例如上游限流返回 403）
-func (s *Store) RefreshStale() {
+// SiteSync 是一个站点的列表同步状态（供前端展示「上次同步时间」）。
+type SiteSync struct {
+	Site        string `json:"site"`
+	LastSync    int64  `json:"last_sync"`    // 最近一次成功同步的 Unix 时间（0 表示还没成功过）
+	LastAttempt int64  `json:"last_attempt"` // 最近一次尝试的时间（含失败）
+	Pages       int    `json:"pages"`        // 已缓存的有内容的页数
+	Items       int    `json:"items"`        // 各页条目数之和（有重复，仅供参考）
+	Empty       bool   `json:"empty"`        // 已翻到站点末尾
+	Error       string `json:"error,omitempty"`
+	Breaker     string `json:"breaker,omitempty"` // closed / open / half-open
+}
+
+// SiteSyncs 汇总各站点的列表同步状态，用于「上游有没有更新」的观察。
+func (s *Store) SiteSyncs() []SiteSync {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	now := time.Now()
-	expired, failed, embedOnly := 0, 0, 0
+	out := make([]SiteSync, 0, len(s.sites))
+	for _, p := range s.sites {
+		if p == nil {
+			continue
+		}
+		name := p.Name()
+		row := SiteSync{Site: name}
+		for _, ps := range s.pages {
+			site := ps.site
+			if site == "" {
+				site = s.defSite
+			}
+			if site != name {
+				continue
+			}
+			if ps.lastList.After(time.Unix(row.LastSync, 0)) {
+				row.LastSync = ps.lastList.Unix()
+			}
+			if ps.lastAttempt > row.LastAttempt {
+				row.LastAttempt = ps.lastAttempt / int64(time.Second)
+			}
+			if len(ps.ids) > 0 {
+				row.Pages++
+				row.Items += len(ps.ids)
+			}
+			if ps.empty {
+				row.Empty = true
+			}
+			row.Error = ps.lastErr
+		}
+		st := s.stateOfLocked(name)
+		switch {
+		case st.cooling(now):
+			row.Breaker = "open"
+		case st.failStreak >= siteFailsCooldown:
+			row.Breaker = "half-open"
+		default:
+			row.Breaker = "closed"
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// RefreshStale 把「还没拿到直链、且已到重试时间」的条目重新入队。
+//
+// 注意这里**不按时间刷新已有直链**：直链的签名通常能用很久，而且是否有
+// 效只有播放时才真正知道。已解析出直链的条目一律不动，等前端播放失败时
+// 调用 Repair 按需重解析（懒加载）。
+//
+// 顺带修一批历史脏数据：旧版本把「节流跳过」当成一次失败写回，导致明明
+// 有直链的条目上也挂着 error。这些条目能播，直接清掉错误标记即可。
+func (s *Store) RefreshStale() {
+	now := time.Now().Unix()
+	retry, never, healed := 0, 0, 0
 	s.mu.Lock()
 	for key, it := range s.items {
+		if provider.IsMediaURL(it.PlayURL) {
+			if it.Error != "" || it.RetryAt != 0 {
+				it.Error = ""
+				it.RetryAt = 0
+				healed++
+			}
+			continue
+		}
+		// 懒加载模式：不主动补解析，等播放时按需（Repair）再请求上游。
+		if s.lazy {
+			continue
+		}
 		if s.pending[key] || s.inflight[key] {
 			continue
 		}
-		// 直链过期：只换签名，成本最低，优先处理。
-		if provider.IsMediaURL(it.PlayURL) && it.PlayPage != "" &&
-			now.Sub(time.Unix(it.UpdatedAt, 0)) > s.videoTTL {
-			s.enqueueLocked(key)
-			expired++
+		// 还没到重试时间：让一让，避免节流时反复空转。
+		if it.RetryAt > now {
 			continue
 		}
-		// 只有网页播放页、还没挖出直链：重解析一次。
-		if it.PlayPage != "" && !provider.IsMediaURL(it.PlayURL) && it.Error != "" &&
-			it.RetryAt > 0 && it.RetryAt <= now.Unix() {
-			s.enqueueLocked(key)
-			embedOnly++
-			continue
-		}
-		// 解析失败（无地址）且已到重试时间。
-		if it.PlayURL == "" && it.Error != "" && it.RetryAt > 0 && it.RetryAt <= now.Unix() {
-			s.enqueueLocked(key)
-			failed++
+		s.enqueueLocked(key)
+		if it.Error != "" {
+			retry++
+		} else {
+			never++
 		}
 	}
 	s.mu.Unlock()
 
-	if expired > 0 || failed > 0 || embedOnly > 0 {
-		log.Printf("[Refresh] 入队 %d 条过期直链、%d 条失败重试、%d 条待挖嵌入页直链",
-			expired, failed, embedOnly)
+	if retry > 0 || never > 0 || healed > 0 {
+		log.Printf("[Refresh] 入队 %d 条待重试、%d 条尚未解析出直链，清理 %d 条无效错误标记",
+			retry, never, healed)
+	}
+	if healed > 0 {
+		s.markDirty()
 	}
 }

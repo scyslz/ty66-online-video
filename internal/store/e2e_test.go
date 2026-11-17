@@ -66,7 +66,6 @@ func TestEndToEndTwoSites(t *testing.T) {
 	st := New(Options{
 		File:      filepath.Join(dir, "store.json"),
 		ListTTL:   time.Minute,
-		VideoTTL:  time.Hour,
 		Keep:      time.Hour,
 		Workers:   2,
 		MaxItems:  100,
@@ -132,7 +131,7 @@ func TestEndToEndTwoSites(t *testing.T) {
 		t.Fatal(err)
 	}
 	st2 := New(Options{
-		File: filepath.Join(dir, "store.json"), ListTTL: time.Minute, VideoTTL: time.Hour,
+		File: filepath.Join(dir, "store.json"), ListTTL: time.Minute,
 		Keep: time.Hour, Workers: 2, MaxItems: 100,
 		Providers: []provider.Provider{siteA, siteB},
 	})

@@ -57,7 +57,6 @@ func newTestStore(t *testing.T, providers ...provider.Provider) *Store {
 	st := New(Options{
 		File:      filepath.Join(dir, "store.json"),
 		ListTTL:   time.Minute,
-		VideoTTL:  time.Hour,
 		Keep:      time.Hour,
 		Workers:   2,
 		MaxItems:  100,
@@ -145,7 +144,7 @@ func TestLoadLegacyFile(t *testing.T) {
 	}
 
 	st := New(Options{
-		File: file, ListTTL: time.Minute, VideoTTL: time.Hour,
+		File: file, ListTTL: time.Minute,
 		Keep: time.Hour, Workers: 2, MaxItems: 100,
 		Providers: []provider.Provider{newFake("alpha")},
 	})
@@ -242,7 +241,7 @@ func TestLoadDropsUnknownSitePages(t *testing.T) {
 	}
 
 	st := New(Options{
-		File: file, ListTTL: time.Minute, VideoTTL: time.Hour,
+		File: file, ListTTL: time.Minute,
 		Keep: time.Hour, Workers: 1, MaxItems: 100,
 		Providers: []provider.Provider{newFake("alpha")},
 	})
@@ -476,7 +475,7 @@ func TestOrderPersists(t *testing.T) {
 
 	mk := func() *Store {
 		return New(Options{
-			File: file, ListTTL: time.Minute, VideoTTL: time.Hour,
+			File: file, ListTTL: time.Minute,
 			Keep: time.Hour, Workers: 2, MaxItems: 100,
 			Providers: []provider.Provider{p},
 		})

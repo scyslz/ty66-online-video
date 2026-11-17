@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,7 +74,7 @@ func (s *Store) fetchList(site string, page int) ([]Item, error) {
 	return p.FetchList(page)
 }
 
-// listLoop 是唯一的列表抓取者：按 TTL 周期性同步已跟踪的页，
+// listLoop 是唯一的列表抓取者：按 TTL 周期性做增量同步，
 // 同时响应按需同步请求。启动时不预抓，等首个请求或第一个 tick。
 // listLoop 负责定时任务；按需补页由 queue.go 里的固定 worker 池消费。
 func (s *Store) listLoop(ctx context.Context) {
@@ -85,42 +86,89 @@ func (s *Store) listLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			// 只刷新最近被访问过的页，冷门页按需再抓。
-			for _, k := range s.activePages() {
-				site, page := splitPageKey(k)
-				s.SyncPageSite(site, page, false)
-			}
+			s.syncIncrementalAll()
 			s.pruneOrphans()
 		}
 	}
 }
 
-// activePages 返回最近被访问过的页键（按最近使用时间倒序），用于定时刷新。
-func (s *Store) activePages() []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	type entry struct {
-		key  string
-		used time.Time
-	}
-	entries := make([]entry, 0, len(s.pages))
-	for key, ps := range s.pages {
-		if len(ps.ids) == 0 {
+// syncIncrementalAll 对所有站点做一轮增量同步。
+func (s *Store) syncIncrementalAll() {
+	for _, p := range s.sites {
+		if p == nil {
 			continue
 		}
-		entries = append(entries, entry{key, ps.lastUsed})
+		s.syncIncrementalSite(p.Name())
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].used.After(entries[j].used) })
-	if len(entries) > maxActivePages {
-		entries = entries[:maxActivePages]
+}
+
+// syncIncrementalSite 从第 1 页开始往下逐页比对，直到「撞上本地已有的条目」。
+//
+// 判定逻辑：每抓一页，就和本地映射里已有的 ID 比对——
+//   - 该页出现本地已有的 ID，说明已经追平上次同步的位置（例如上次排到 123，
+//     这次翻到含 123 的那一页），后面的页都是老内容，立刻停；
+//   - 整页都是没见过的 ID，说明还没追平，继续往下一页；
+//   - 一直追不平（例如首次同步），最多抓 maxIncrementalPages 页就收手，
+//     避免一口气把上游全站翻一遍触发风控。
+//
+// 顺序处理：第 1 页整页按上游顺序放到队首（旧条目自然后移一格），
+// 更深页只把「新增的」按顺序接在第 1 页之后。这样上游插到第 1 页的新帖
+// 一定在最前，被挤下去的旧帖位置后移，不重复也不遗漏。
+func (s *Store) syncIncrementalSite(site string) {
+	if site == "" {
+		site = s.defSite
+	}
+	if s.provider(site) == nil {
+		return
 	}
 
-	keys := make([]string, len(entries))
-	for i, e := range entries {
-		keys[i] = e.key
+	front := make([]string, 0, 64) // 待放到队首的键（第 1 页整页 + 更深页的新增）
+	pages, added := 0, 0
+
+	// 本轮开始前就存在的键：用来判断「这一页有没有老条目」，即是否已追平。
+	preKnown := s.knownKeys(site)
+
+	for page := 1; page <= maxIncrementalPages; page++ {
+		res, _ := s.syncPageMerge(site, page, false, preKnown)
+		if !res.ok {
+			break // 空页、失败或节流：本轮到此为止
+		}
+		pages++
+		added += len(res.newKeys)
+		if page == 1 {
+			front = append(front, res.keys...)
+		} else {
+			front = append(front, res.newKeys...)
+		}
+		if res.hasKnown {
+			break // 撞上本地已有的 ID：已追平上次同步的位置
+		}
 	}
-	return keys
+
+	if len(front) > 0 {
+		s.mu.Lock()
+		s.orderOfLocked(site).PrependPage(front)
+		s.mu.Unlock()
+		s.markDirty()
+	}
+
+	if pages > 0 {
+		log.Printf("[List] %s 更新 %d 页 %d 条", site, pages, added)
+	}
+}
+
+// knownKeys 返回某站点当前已入库的全部键（本轮同步开始前的快照）。
+func (s *Store) knownKeys(site string) map[string]bool {
+	prefix := site + ":"
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]bool, len(s.items))
+	for k := range s.items {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // pageSyncLock 返回某页列表抓取的互斥锁，保证同一页不会被并发抓取。
@@ -137,7 +185,8 @@ func (s *Store) pageSyncLock(key string) *sync.Mutex {
 
 // SyncPage 抓默认站点的一页列表（兼容旧调用）。
 func (s *Store) SyncPage(page int, force bool) int {
-	return s.SyncPageSite(s.defSite, page, force)
+	res, _ := s.syncPageMerge(s.defSite, page, force, nil)
+	return len(res.keys)
 }
 
 // SyncPageSite 抓某站点的一页列表，用 id 与本地映射做增量合并。
@@ -145,12 +194,33 @@ func (s *Store) SyncPage(page int, force bool) int {
 // force=true 时忽略 TTL（用于手动刷新）。
 // 返回该页当前的条目数；失败或数据异常时保留原有顺序不变。
 func (s *Store) SyncPageSite(site string, page int, force bool) int {
+	res, _ := s.syncPageMerge(site, page, force, nil)
+	return len(res.keys)
+}
+
+// pageMergeResult 是一页列表合并进映射后的结果，供增量同步判断是否继续。
+type pageMergeResult struct {
+	keys     []string // 本页按上游顺序的键
+	newKeys  []string // 其中本次新入库的键（保持上游顺序）
+	hasKnown bool     // 本页是否出现了「同步前就已存在」的条目
+	ok       bool     // 是否抓到了内容（空页 / 失败 / 节流为 false）
+}
+
+// syncPageMerge 抓一页并合并进映射，返回合并结果。
+//
+// 展示顺序只做「兜底」处理（见 orderAfterPageLocked）；增量同步会拿到
+// 结果后统一把新内容插到队首，见 syncIncrementalSite。
+//
+// preKnown 是「本轮同步开始前就已存在的键」，用来判断这一页是否已经包含
+// 上次同步过的内容；为 nil 时按本次抓取前的映射计算。
+func (s *Store) syncPageMerge(site string, page int, force bool, preKnown map[string]bool) (pageMergeResult, string) {
+	var empty pageMergeResult
 	if site == "" {
 		site = s.defSite
 	}
 	if p := s.provider(site); p == nil {
 		log.Printf("[List] 未知站点 %q，跳过第 %d 页", site, page)
-		return 0
+		return empty, site
 	}
 	key := pageKey(site, page)
 	lock := s.pageSyncLock(key)
@@ -161,15 +231,15 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 	// 站点级熔断（三态）：
 	//   冷却期内       → 直接跳过
 	//   冷却期已结束    → 放行一次试探请求（halfOpen），由它的结果决定恢复或再熔断
-	// force=true      → 手动刷新，始终放行，并重置熔断状态
+	//   force=true      → 手动刷新，始终放行，并重置熔断状态
 	if !force {
 		if st := s.stateOfLocked(site); !st.allow(time.Now()) {
-			n := 0
+			var cached []string
 			if ps, ok := s.pages[key]; ok {
-				n = len(ps.ids)
+				cached = append(cached, ps.ids...)
 			}
 			s.mu.Unlock()
-			return n
+			return pageMergeResult{keys: cached}, site
 		}
 	} else {
 		// 手动刷新：无条件重试并重置熔断状态。
@@ -180,16 +250,30 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 		ps = &pageState{site: site, page: page}
 		s.pages[key] = ps
 	}
+	// 抓取前的快照：判断「本页有没有老条目」要用它，别把本页新入库的算进去。
+	if preKnown == nil {
+		preKnown = make(map[string]bool, len(s.items))
+		for k := range s.items {
+			preKnown[k] = true
+		}
+	}
 	// 刚同步过（TTL 内）或正在别处抓取，都不重复请求（force 除外）。
 	if !force && !ps.lastList.IsZero() && time.Since(ps.lastList) < s.listTTL {
-		n := len(ps.ids)
+		cached := append([]string(nil), ps.ids...)
+		known := false
+		for _, k := range cached {
+			if preKnown[k] {
+				known = true
+				break
+			}
+		}
 		s.mu.Unlock()
-		return n
+		return pageMergeResult{keys: cached, hasKnown: known, ok: len(cached) > 0}, site
 	}
 	if s.syncing[key] {
-		n := len(ps.ids)
+		cached := append([]string(nil), ps.ids...)
 		s.mu.Unlock()
-		return n
+		return pageMergeResult{keys: cached, ok: len(cached) > 0}, site
 	}
 	s.syncing[key] = true
 	known := len(ps.ids)
@@ -215,11 +299,11 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 		ps.lastErr = ""
 		ps.fails = 0
 		s.stateOfLocked(site).onSuccess()
-		n := len(ps.ids)
+		cached := append([]string(nil), ps.ids...)
 		s.mu.Unlock()
 		log.Printf("[List] %s 第 %d 页为空，判定为站点末尾", site, page)
 		s.markDirty()
-		return n
+		return pageMergeResult{keys: cached}, site
 	}
 	switch {
 	case err != nil:
@@ -235,7 +319,7 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 			ps.lastErr = err.Error()
 			s.mu.Unlock()
 			log.Printf("[List] %s 第 %d 页因节流跳过，稍后重试", site, page)
-			return 0
+			return empty, site
 		}
 		ps.lastErr = err.Error()
 		ps.fails++
@@ -252,7 +336,7 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 			log.Printf("[List] %s 第 %d 页同步失败（第 %d 次，沿用缓存 %d 条）: %v",
 				site, page, streak, known, err)
 		}
-		return 0
+		return empty, site
 	}
 	ps.lastErr = ""
 	ps.fails = 0
@@ -282,6 +366,15 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 		listFields[k] = l
 	}
 
+	// 本页是否出现「同步前就已存在」的条目：出现即说明已追平上次同步位置。
+	hasKnown := false
+	for _, r := range uniq {
+		if preKnown[r.key] {
+			hasKnown = true
+			break
+		}
+	}
+
 	// 容量不足时，先淘汰“新列表里已经没有”的旧条目给新帖腾位置。
 	capacity := s.maxItems - len(s.items)
 	future := make(map[string]bool, len(uniq))
@@ -302,6 +395,7 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 
 	// 按上游顺序重建本页：已有条目复用映射，新帖在容量允许时入库。
 	keys := make([]string, 0, len(uniq))
+	newKeys := make([]string, 0, len(uniq))
 	added, skipped := 0, 0
 	for _, r := range uniq {
 		if _, ok := s.items[r.key]; ok {
@@ -318,6 +412,7 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 		it.Page = page
 		s.items[r.key] = &it
 		keys = append(keys, r.key)
+		newKeys = append(newKeys, r.key)
 		added++
 		s.enqueueLocked(r.key)
 	}
@@ -336,24 +431,12 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 			it.Site = site
 			it.Page = page
 		}
-		if needsDetail(it, now) {
+		if s.NeedsDetail(it, now) {
 			s.enqueueLocked(k)
 		}
 	}
-	// 展示顺序交给站点队列维护（唯一真源），队列本身去重：
-	//   - 第 1 页：按上游顺序整体插到队首，旧条目自然顺移一格
-	//     （这就是「新数据在最前」且不会重复/漏条的原因）
-	//   - 其它页：保持既有顺序不变，只把本页新出现的条目追加到队尾
-	//     （中间页被刷新时若整体重排，会让用户已看到的顺序跳动）
-	q := s.orderOfLocked(site)
-	switch {
-	case page == 1:
-		q.PrependPage(keys)
-	case q.Len() == 0:
-		q.AppendKeys(keys)
-	default:
-		q.AppendKeys(newKeysOnly(q, keys))
-	}
+	// 展示顺序：单页刷新走兜底规则；增量同步随后会再统一插到队首（幂等）。
+	s.orderAfterPageLocked(site, page, keys, newKeys)
 	ps.site = site
 	ps.page = page
 	ps.empty = false
@@ -380,7 +463,22 @@ func (s *Store) SyncPageSite(site string, page int, force bool) int {
 			page, len(keys), added, total, s.maxItems, queued, dropped)
 	}
 	s.markDirty()
-	return len(keys)
+	return pageMergeResult{keys: keys, newKeys: newKeys, hasKnown: hasKnown, ok: len(keys) > 0}, site
+}
+
+// orderAfterPageLocked 是单页刷新时的展示顺序兜底规则：
+//   - 第 1 页：按上游顺序整体插到队首，旧条目自然顺移
+//   - 其它页：只把本页新增的条目接在队尾（避免中间页刷新导致顺序跳动）
+func (s *Store) orderAfterPageLocked(site string, page int, keys, newKeys []string) {
+	q := s.orderOfLocked(site)
+	switch {
+	case page == 1:
+		q.PrependPage(keys)
+	case q.Len() == 0:
+		q.AppendKeys(keys)
+	default:
+		q.AppendKeys(newKeys)
+	}
 }
 
 // newKeysOnly 过滤出尚未进入队列的键（保持原顺序）。
@@ -440,6 +538,9 @@ func (s *Store) evictUnlistedLocked(n int, replacingPage string, future map[stri
 	if len(order) > n {
 		order = order[:n]
 	}
+	// 注意：这里持有 s.mu，不能去拿 detailMu（按需修复是 detailMu → s.mu 的顺序，
+	// 反着来会死锁）。淘汰条目的解析锁留给 pruneOrphans 之外的路径自然复用，
+	// 这些锁对象很小，数量与条目同阶，不会无限增长。
 	for _, i := range order {
 		delete(s.items, keys[i])
 	}
@@ -460,17 +561,22 @@ func (s *Store) pruneOrphans() {
 			referenced[k] = true
 		}
 	}
-	removed := 0
+	removed := make([]string, 0, 8)
 	for k, it := range s.items {
 		if !referenced[k] && !s.pending[k] && it.UpdatedAt > 0 && it.UpdatedAt < cutoff {
 			delete(s.items, k)
-			removed++
+			removed = append(removed, k)
 		}
 	}
 	s.mu.Unlock()
 
-	if removed > 0 {
-		log.Printf("[Prune] 清理 %d 条长期未在列表出现的映射", removed)
+	// 条目已删除，顺手清掉它的解析锁，避免映射无限增长。
+	for _, k := range removed {
+		s.dropKeyLock(k)
+	}
+
+	if len(removed) > 0 {
+		log.Printf("[Prune] 清理 %d 条长期未在列表出现的映射", len(removed))
 		s.markDirty()
 	}
 }

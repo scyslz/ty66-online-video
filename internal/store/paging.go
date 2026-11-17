@@ -198,7 +198,7 @@ func (s *Store) resolveWindowItems(items []Item) {
 			continue
 		}
 		key := itemKey(it.Site, it.ID)
-		if cur, ok := s.items[key]; ok && needsDetail(cur, now) {
+		if cur, ok := s.items[key]; ok && s.NeedsDetail(cur, now) {
 			s.enqueueLocked(key)
 		}
 	}
@@ -221,6 +221,10 @@ func (s *Store) refreshItems(items []Item) []Item {
 
 // pendingCount 统计给定条目里还没有播放地址的数量。
 func (s *Store) pendingCount(items []Item) int {
+	// 懒加载模式下，没直链是常态（等播放时才解析），不该显示成「解析中」。
+	if s.lazy {
+		return 0
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := 0

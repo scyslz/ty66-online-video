@@ -217,8 +217,7 @@ main {
 .toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 12px;
   flex-wrap: wrap;
 }
@@ -226,12 +225,15 @@ main {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 1 1 420px;
+  justify-content: flex-end;
 }
 
 /* 过滤分类标签 (与搜索框统一 28px 高度与基准线对齐) */
 .filter-nav {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   background: var(--btn-bg);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -264,7 +266,9 @@ main {
 /* 搜索框 (严格统一 28px 高度，两端对称居中对齐) */
 .search-wrap {
   position: relative;
-  width: 210px;
+  flex: 1 1 200px;
+  min-width: 140px;
+  max-width: 300px;
   height: 28px;
   display: flex;
   align-items: center;
@@ -302,32 +306,66 @@ main {
   font-size: 11px;
 }
 #btnReload {
+  width: 28px;
+  min-width: 28px;
   height: 28px;
-  padding: 0 10px;
-  font-size: 11px;
+  padding: 0;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  justify-content: center;
 }
 
-/* 顶栏历史入口 */
-.header-history {
-  background: none;
-  border: none;
-  padding: 0;
-  font-size: 11px;
-  color: var(--viewed-blue);
-  cursor: pointer;
+/* 顶栏同步状态：只显示时间，点开看各站点时间 */
+.sync-wrap { position: relative; display: inline-flex; }
+.header-sync {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 5px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition);
 }
-.header-history:hover { text-decoration: underline; }
-.header-history.active { font-weight: 600; }
+.header-sync:hover { background: var(--btn-bg); border-color: var(--border); color: var(--text); }
+.header-sync[aria-expanded="true"] { background: var(--btn-bg); border-color: var(--border); color: var(--text); }
+.header-sync .dot { width: 5px; height: 5px; }
+.sync-caret { width: 10px; height: 10px; opacity: 0.7; transition: transform 0.2s ease; }
+.header-sync[aria-expanded="true"] .sync-caret { transform: rotate(180deg); }
+
+/* 展开面板：各站点同步明细 */
+.sync-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 40;
+  min-width: 230px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  font-size: 11px;
+  color: var(--text);
+}
+.sync-panel[hidden] { display: none; }
+.sync-row { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 5px 4px; white-space: nowrap; }
+.sync-row + .sync-row { border-top: 1px solid var(--border); }
+.sync-row .sync-site { font-weight: 600; flex: none; }
+.sync-row .sync-when { color: var(--text-muted); text-align: right; }
+.sync-row .sync-note { color: var(--text-dim); }
 
 /* 域名过滤下拉（与搜索框同高，窄屏可收缩） */
 .domain-select {
   height: 28px;
+  flex: 0 1 130px;
+  min-width: 90px;
   max-width: 160px;
   padding: 0 6px;
   font-size: 11px;
@@ -548,27 +586,25 @@ main {
 .v-ext-link:hover { color: var(--primary); background: var(--btn-hover); }
 .v-ext-link svg { width: 11px; height: 11px; }
 
-/* 底部极简分页栏 */
+/* 底部极简分页栏：所有内容居中收拢 */
 .pagination {
-  margin-top: 18px;
-  padding: 12px;
+  margin-top: 16px;
+  padding: 12px 8px;
   border-top: 1px solid var(--border);
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 8px 14px;
   font-size: 11px;
   color: var(--text-muted);
-  flex-wrap: wrap;
-  gap: 10px;
 }
 .pagination-meta {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
 }
-.page-size-label,
-.pager-jump {
+.page-size-label {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -596,12 +632,18 @@ main {
   margin: 0;
 }
 
-/* 页码区：左右两端按钮 + 中间页码列表 */
+/* 页码区：翻页按钮 + 页码 + 跳页，紧贴成一组 */
 .pager {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+.pager-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
 }
 .pager-btn {
   min-width: 26px;
@@ -654,26 +696,27 @@ main {
 @media (max-width: 768px) {
   .pagination {
     flex-direction: column;
-    align-items: stretch;
+    align-items: center;
     gap: 8px;
     padding: 10px 4px;
   }
   .pagination-meta {
-    justify-content: space-between;
+    justify-content: center;
   }
   .pager {
     justify-content: center;
-    gap: 3px;
+    flex-wrap: wrap;
+    gap: 6px;
   }
   .pager-nums {
     order: 10;
     width: 100%;
     justify-content: center;
-    margin: 4px 0 0;
+    margin: 2px 0 0;
     flex-wrap: wrap;
   }
   .pager-jump {
-    margin-left: auto;
+    margin-left: 2px;
   }
 }
 
@@ -948,7 +991,12 @@ main {
 
 /* 移动端适配 */
 @media (max-width: 768px) {
-  .header-wrap { padding: 6px 12px; }
+  .header-wrap { padding: 6px 12px; gap: 8px; }
+  .header-meta { gap: 8px; }
+  /* 窄屏时时间可能被截断，展开面板仍可看全 */
+  .header-sync { max-width: 96px; overflow: hidden; }
+  #syncInfo { overflow: hidden; text-overflow: ellipsis; }
+  .sync-panel { min-width: 200px; }
   main { padding: 8px 10px 30px; }
   .toolbar {
     flex-direction: column;
@@ -966,14 +1014,12 @@ main {
     text-align: center;
   }
   .tool-group {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    gap: 6px;
+    flex: 1 1 100%;
+    justify-content: stretch;
   }
   .search-wrap {
-    flex: 1;
-    width: auto;
+    flex: 1 1 auto;
+    min-width: 0;
     max-width: none;
   }
   
@@ -1026,7 +1072,16 @@ main {
     <div class="header-meta">
       <span><span class="dot" id="statusDot"></span> <span id="statusText">就绪</span></span>
       <span>共 <strong id="statTotal">0</strong> 条</span>
-      <button id="statHistoryBtn" class="header-history" title="查看历史">历史 <strong id="statViewed">0</strong></button>
+      <div class="sync-wrap">
+        <button id="syncBtn" class="header-sync" type="button" aria-expanded="false" aria-controls="syncPanel" title="列表上次同步时间">
+          <span class="dot" id="syncDot"></span>
+          <span id="syncInfo">—</span>
+          <svg class="sync-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"></polyline>
+          </svg>
+        </button>
+        <div id="syncPanel" class="sync-panel" role="dialog" aria-label="站点同步状态" hidden></div>
+      </div>
       
       <!-- 黑白主题切换按钮 -->
       <button id="themeToggleBtn" class="btn-theme" title="切换黑/白主题">
@@ -1063,7 +1118,7 @@ main {
     </div>
 
     <!-- 搜索框、域名过滤与全局刷新 -->
-    <div class="tool-group" style="flex:1;justify-content:flex-end">
+    <div class="tool-group">
       <div class="search-wrap">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
         <input type="text" id="searchInput" placeholder="搜索关键词...">
@@ -1075,9 +1130,8 @@ main {
       <select id="sourceSelect" class="domain-select" title="按来源过滤">
         <option value="">全部来源</option>
       </select>
-      <button id="btnReload" title="从头刷新获取最新数据">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
-        刷新
+      <button id="btnReload" class="icon-btn" title="刷新列表" aria-label="刷新列表">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
       </button>
     </div>
   </div>
@@ -1102,11 +1156,15 @@ main {
       </label>
     </div>
     <nav class="pager" id="pager" aria-label="分页">
-      <button id="pFirst" class="pager-btn pager-edge" title="第一页">«</button>
-      <button id="pPrev" class="pager-btn pager-edge" title="上一页">‹</button>
+      <span class="pager-nav">
+        <button id="pFirst" class="pager-btn pager-edge" title="第一页">«</button>
+        <button id="pPrev" class="pager-btn pager-edge" title="上一页">‹</button>
+      </span>
       <span class="pager-nums" id="pagerNums"></span>
-      <button id="pNext" class="pager-btn pager-edge" title="下一页">›</button>
-      <button id="pLast" class="pager-btn pager-edge" title="最后一页">»</button>
+      <span class="pager-nav">
+        <button id="pNext" class="pager-btn pager-edge" title="下一页">›</button>
+        <button id="pLast" class="pager-btn pager-edge" title="最后一页">»</button>
+      </span>
       <label class="pager-jump">
         跳至
         <input type="text" id="jumpInput" inputmode="numeric" autocomplete="off" title="输入页码后按回车">
@@ -1427,6 +1485,12 @@ let playLine = 'direct';
 let proxyAvailable = false;
 // 本次播放是否已自动切过线路，避免失败后反复来回切换
 let autoSwitchedLine = false;
+// 已经尝试过「按需重解析」的条目键：同一视频一次播放只解析一次，避免死循环
+let repairedFor = '';
+// 正在进行的按需重解析请求（同一条目并发点击只发一次）
+let repairInFlight = null;
+// 失败处理是否正在执行（防止 onerror/超时/HLS fatal 同时触发多轮降级）
+let failHandling = false;
 
 (function loadPlayLine() {
   try {
@@ -1569,6 +1633,96 @@ function setAppStatus(text, type = 'ready') {
   const d = document.getElementById('statusDot');
   d.className = 'dot' + (type === 'loading' ? ' loading' : (type === 'error' ? ' error' : ''));
 }
+
+// 顶栏同步状态：只显示时间，点开看各站点时间。
+//
+// 不显示「x 小时前」这类相对时间——旁边已经有绝对时间了，两个一起看反而乱。
+let siteSyncCache = [];
+
+// 紧凑时间：今天只给 HH:mm，更早给 MM-DD HH:mm。
+function compactTime(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (sameDay) return hm;
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+}
+
+function renderSyncInfo(siteSync) {
+  siteSyncCache = Array.isArray(siteSync) ? siteSync : [];
+  const text = document.getElementById('syncInfo');
+  const dot = document.getElementById('syncDot');
+  if (!text) return;
+
+  if (siteSyncCache.length === 0) {
+    text.textContent = '—';
+    if (dot) dot.className = 'dot';
+    renderSyncPanel();
+    return;
+  }
+
+  // 一行显示：最近同步时间 · 总页数 · 总条数；异常时点亮琥珀色圆点。
+  let latest = 0, pages = 0, items = 0, warn = false;
+  for (const s of siteSyncCache) {
+    if (s.last_sync > latest) latest = s.last_sync;
+    pages += s.pages || 0;
+    items += s.items || 0;
+    if ((s.breaker && s.breaker !== 'closed') || s.error) warn = true;
+  }
+  text.textContent = `${compactTime(latest)} · ${pages} 页 ${items} 条`;
+  if (dot) dot.className = 'dot' + (warn ? ' loading' : '');
+  renderSyncPanel();
+}
+
+function renderSyncPanel() {
+  const panel = document.getElementById('syncPanel');
+  if (!panel) return;
+  if (siteSyncCache.length === 0) {
+    panel.hidden = true;
+    return;
+  }
+  let html = '';
+  for (const s of siteSyncCache) {
+    const notes = [];
+    if (s.empty) notes.push('已到末尾');
+    if (s.breaker === 'open') notes.push('★ 限流中');
+    else if (s.breaker === 'half-open') notes.push('★ 恢复中');
+    if (s.error) notes.push(esc(s.error));
+    html += `
+      <div class="sync-row">
+        <span class="sync-site">${esc(s.site || '-')}</span>
+        <span class="sync-when">${esc(compactTime(s.last_sync))} <span class="sync-note">${s.pages || 0} 页 ${s.items || 0} 条</span>${notes.length ? ' ' + notes.join(' ') : ''}</span>
+      </div>`;
+  }
+  panel.innerHTML = html;
+}
+
+function toggleSyncPanel(force) {
+  const btn = document.getElementById('syncBtn');
+  const panel = document.getElementById('syncPanel');
+  if (!btn || !panel) return;
+  const open = force === undefined ? panel.hidden : !!force;
+  panel.hidden = !open;
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) renderSyncPanel();
+}
+
+document.getElementById('syncBtn').addEventListener('click', e => {
+  e.stopPropagation();
+  toggleSyncPanel();
+});
+// 点面板外面或按 Esc 收起
+document.addEventListener('click', e => {
+  const wrap = e.target.closest && e.target.closest('.sync-wrap');
+  if (!wrap) toggleSyncPanel(false);
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') toggleSyncPanel(false);
+});
 
 // 从服务端按窗口取数：offset/limit（可带域名过滤），返回 items 与 total。
 // 后台补页时最多轮询几次、每次间隔多久
@@ -1733,8 +1887,6 @@ function getProcessedData() {
 }
 
 function render(refilling = false) {
-  document.getElementById('statViewed').textContent = ViewHistory.getCount();
-
   const historyView = isHistoryView();
   const processed = getProcessedData();
 
@@ -1864,6 +2016,9 @@ function hideError() {
 
 function retryVideo() {
   if (currentPlayingItem) {
+    // 手动重试：允许再走一次按需重解析（之前的失败可能只是上游临时抽风）。
+    repairedFor = '';
+    autoSwitchedLine = false;
     openPlayer(currentPlayingItem);
   }
 }
@@ -1881,7 +2036,7 @@ function renderPagination(totalPages) {
   document.getElementById('pNext').disabled = ourPage >= totalPages;
   document.getElementById('pLast').disabled = ourPage >= totalPages;
 
-  // 页码按钮：始终显示首末页，当前页两侧各留 1 页，其余用省略号
+  // 页码按钮：始终显示首末页，当前页两侧各留 2 页，其余用省略号
   const nums = document.getElementById('pagerNums');
   const parts = [];
   const addPage = p => {
@@ -1893,12 +2048,12 @@ function renderPagination(totalPages) {
   };
   const addGap = () => parts.push('<span class="pager-gap">…</span>');
 
-  if (totalPages <= 7) {
+  if (totalPages <= 9) {
     for (let p = 1; p <= totalPages; p++) addPage(p);
   } else {
     addPage(1);
-    const from = Math.max(2, ourPage - 1);
-    const to = Math.min(totalPages - 1, ourPage + 1);
+    const from = Math.max(2, ourPage - 2);
+    const to = Math.min(totalPages - 1, ourPage + 2);
     if (from > 2) addGap();
     for (let p = from; p <= to; p++) addPage(p);
     if (to < totalPages - 1) addGap();
@@ -1979,13 +2134,100 @@ function resetPlayer() {
   f.style.display = 'none';
 }
 
+/**
+ * 按需重解析（懒加载）：
+ * 后台不再定期刷新直链签名，所以旧地址可能已经失效。
+ * 播放失败时调用后端 /api/resolve，只重解析当前这一条；
+ * 拿到新地址就原地换源重播，拿不到再走线路切换 / 错误面板。
+ */
+function itemKeyOf(it) {
+  return it ? `${it.site || ''}|${it.id || it.thread_url || ''}` : '';
+}
+
+async function requestRepair(it) {
+  const id = it && (it.id || '');
+  if (!id) return null;
+  const url = `/api/resolve?id=${encodeURIComponent(id)}` +
+    (it.site ? `&site=${encodeURIComponent(it.site)}` : '');
+  try {
+    const res = await fetch(url, { method: 'POST' });
+    if (!res.ok) return null;
+    const j = await res.json();
+    const fresh = j && j.item;
+    if (!fresh) return null;
+    // 把新地址同步回列表数据和当前播放条目，重播时直接用上。
+    Object.assign(it, fresh);
+    for (const x of allData) {
+      if (itemKeyOf(x) === itemKeyOf(it)) Object.assign(x, fresh);
+    }
+    return { item: it, changed: !!j.changed };
+  } catch (e) {
+    return null;
+  }
+}
+
+// 尝试一次按需重解析；同一条目在一次播放里只试一次。
+async function tryRepairOnce(it) {
+  const key = itemKeyOf(it);
+  if (!key || repairedFor === key) return null;
+  repairedFor = key;
+  showLoading('旧地址已失效，正在重新解析视频地址...');
+  repairInFlight = requestRepair(it);
+  const out = await repairInFlight;
+  repairInFlight = null;
+  return out;
+}
+
+// 懒加载：列表只带标题与链接，播放时才去解析这一条的直链。
+// 解析不出就显示错误面板，并保留「原网页打开」的退路。
+async function resolveThenPlay(it) {
+  currentPlayingItem = it;
+  repairedFor = '';
+  autoSwitchedLine = false;
+  failHandling = false;
+  resetPlayer();
+  document.body.classList.add('modal-open');
+  syncLineSwitch();
+  document.getElementById('playerErrorLineBtn').style.display = 'none';
+  document.getElementById('mtitle').textContent = it.title || '播放';
+  document.getElementById('mopen').href = it.thread_url || it.play_page || '#';
+
+  showLoading('正在解析视频地址...');
+  const m = document.getElementById('modal');
+  m.style.display = 'flex';
+  requestAnimationFrame(() => m.classList.add('show'));
+
+  const saved = ViewHistory.get(it);
+  if (saved && saved.time > 5 && saved.progress < 95) {
+    pendingResumeTime = saved.time;
+  }
+
+  const out = await tryRepairOnce(it);
+  const addr = it.play_url || it.play_page || it.redirect_url || '';
+  if (!addr) {
+    const why = (out && out.item && out.item.error) ? `原因：${out.item.error}` : '';
+    showError('暂时解析不出播放地址',
+      '上游可能正在限流或该帖还没挂播放链接，稍后重试或直接打开原网页。 ' + why,
+      it.thread_url || '#');
+    return;
+  }
+  openPlayer(it);
+}
+
 function openPlayer(it) {
-  // 换一个视频时重置自动切线路的状态；同一视频内部重试则保留
+  // 懒加载：列表阶段没有直链，先解析再播。
+  if (!(it.play_url || it.play_page || it.redirect_url)) {
+    resolveThenPlay(it);
+    return;
+  }
+  // 换一个视频时重置自动切线路与按需重解析的状态；同一视频内部重试则保留
   if (!currentPlayingItem || currentPlayingItem.id !== it.id || currentPlayingItem.site !== it.site) {
     autoSwitchedLine = false;
+    repairedFor = '';
   }
   currentPlayingItem = it;
   resetPlayer();
+  failHandling = false;
   document.body.classList.add('modal-open');
   syncLineSwitch();
   document.getElementById('playerErrorLineBtn').style.display = 'none';
@@ -2008,25 +2250,44 @@ function openPlayer(it) {
 
   showLoading(playLine === 'proxy' ? '正在通过服务器代理连接视频流...' : '正在连接视频流...');
 
-  // 失败处理：线路一失败时自动切到线路二重试一次，仍失败才提示
-  const fail = (title, desc) => {
+  // 失败处理（逐级降级）：
+  //   1) 该条目还没按需重解析过 → 请求后台换一条新直链，成功就原地重播；
+  //   2) 仍不行 → 线路一自动切线路二（服务器代理）再试一次；
+  //   3) 都失败 → 显示错误面板，可手动切线路或打开原网页。
+  const fail = async (title, desc) => {
     clearTimeout(loadTimer);
-    if (proxyAvailable && playLine === 'direct' && !autoSwitchedLine) {
-      autoSwitchedLine = true;
-      playLine = 'proxy';
-      try { localStorage.setItem(PLAY_LINE_KEY, 'proxy'); } catch (e) {}
-      syncLineSwitch();
-      showToast('直连失败，已自动切换到线路二（服务器代理）');
-      openPlayer(currentPlayingItem);
-      return;
+    // 失败事件可能短时间内来多次（video.onerror、HLS fatal、超时），只处理一次。
+    if (failHandling) return;
+    failHandling = true;
+    try {
+      if (isMedia && repairedFor !== itemKeyOf(it)) {
+        const fixed = await tryRepairOnce(it);
+        if (fixed && fixed.changed && isMediaURL(it.play_url)) {
+          showToast('已重新解析出可播放地址');
+          openPlayer(currentPlayingItem);
+          return;
+        }
+        // 没换来新地址：继续往下走线路切换与错误提示。
+      }
+      if (proxyAvailable && playLine === 'direct' && !autoSwitchedLine) {
+        autoSwitchedLine = true;
+        playLine = 'proxy';
+        try { localStorage.setItem(PLAY_LINE_KEY, 'proxy'); } catch (e) {}
+        syncLineSwitch();
+        showToast('直连失败，已自动切换到线路二（服务器代理）');
+        openPlayer(currentPlayingItem);
+        return;
+      }
+      if (proxyAvailable && playLine === 'proxy') {
+        autoSwitchedLine = false;
+        document.getElementById('playerErrorLineBtn').style.display = 'inline-flex';
+        showError(title, desc || '服务器代理也没能取到画面，可切回线路一或直接打开原网页。', openUrl || url);
+        return;
+      }
+      showError(title, desc, openUrl || url);
+    } finally {
+      failHandling = false;
     }
-    if (proxyAvailable && playLine === 'proxy') {
-      autoSwitchedLine = false;
-      document.getElementById('playerErrorLineBtn').style.display = 'inline-flex';
-      showError(title, desc || '服务器代理也没能取到画面，可切回线路一或直接打开原网页。', openUrl || url);
-      return;
-    }
-    showError(title, desc, openUrl || url);
   };
 
   // 15 秒超时保护（代理线路多一跳，给到 25 秒）
@@ -2187,7 +2448,6 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
     btn.classList.add('active');
     currentFilter = btn.dataset.filter;
     ourPage = 1;
-    document.getElementById('statHistoryBtn').classList.toggle('active', currentFilter === 'history');
 
     // 历史视图用的是本地数据，来源过滤不适用
     const sourceSel = document.getElementById('sourceSelect');
@@ -2270,22 +2530,6 @@ jumpInput.addEventListener('input', () => {
   jumpInput.value = jumpInput.value.replace(/\D/g, '').slice(0, 5);
 });
 
-// 顶栏历史入口：切换到历史视图
-document.getElementById('statHistoryBtn').onclick = () => {
-  document.querySelectorAll('.filter-btn').forEach(b => {
-    b.classList.toggle('active', b.dataset.filter === 'history');
-  });
-  document.getElementById('statHistoryBtn').classList.add('active');
-  currentFilter = 'history';
-  ourPage = 1;
-  const ds = document.getElementById('sourceSelect');
-  ds.value = '';
-  ds.disabled = true;
-  currentSource = '';
-  render();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-};
-
 // 来源过滤下拉
 const sourceSelect = document.getElementById('sourceSelect');
 sourceSelect.onchange = e => {
@@ -2316,17 +2560,22 @@ document.getElementById('btnReload').onclick = () => {
   loadWindow(true);
 };
 
-// 服务端能力：代理是否启用（-proxy 参数），决定“线路二”是否出现在播放器里
+// 服务端能力：代理是否启用（-proxy 参数），决定“线路二”是否出现在播放器里；
+// 顺带拿到各站点列表同步时间，显示在顶栏，便于判断上游有没有更新。
 async function loadServerConfig() {
   try {
     const res = await fetch('/api/status');
     const j = await res.json();
     setProxyAvailable(!!j.proxy);
     renderSiteSelect(j.sites);
+    renderSyncInfo(j.site_sync);
   } catch (e) {
     setProxyAvailable(false);
   }
 }
+
+// 定时刷新顶栏的同步时间（列表每 3 小时同步一次，这里 1 分钟看一眼就够）。
+setInterval(loadServerConfig, 60 * 1000);
 
 // 初次加载
 loadServerConfig();

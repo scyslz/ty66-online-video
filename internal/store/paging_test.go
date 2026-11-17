@@ -125,7 +125,6 @@ func newPageStore(t *testing.T, providers ...provider.Provider) *Store {
 		ListGap:   -1, // 禁用列表节流，避免测试被节流挡住
 		File:      filepath.Join(t.TempDir(), "store.json"),
 		ListTTL:   time.Minute,
-		VideoTTL:  time.Hour,
 		Keep:      time.Hour,
 		Workers:   2,
 		MaxItems:  1000,
@@ -362,7 +361,6 @@ func TestDeepPageLimit(t *testing.T) {
 	st := New(Options{
 		File:      filepath.Join(t.TempDir(), "store.json"),
 		ListTTL:   time.Minute,
-		VideoTTL:  time.Hour,
 		Keep:      time.Hour,
 		Workers:   2,
 		MaxItems:  5000,

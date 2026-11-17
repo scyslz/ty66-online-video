@@ -49,7 +49,10 @@ func main() {
 	addr := flag.String("addr", ":8000", "监听地址")
 	storePath := flag.String("store", "", "映射文件路径（默认 <root>/store.json）")
 	listTTL := flag.Duration("refresh", 3*time.Hour, "上游列表同步间隔")
-	videoTTL := flag.Duration("video-ttl", 6*time.Hour, "直链有效期，超时后换新签名")
+	// 已废弃：直链不再按时间批量续签，改为播放失败时按需重解析。
+	// 仍保留该参数，避免旧启动脚本传参时报错。
+	flag.Duration("video-ttl", 0, "（已废弃，忽略）直链有效期")
+	lazy := flag.Bool("lazy", true, "懒加载：只抓列表，直链等播放时按需解析（减少 403 风控）")
 	keep := flag.Duration("keep", 30*24*time.Hour, "下架映射保留时长（0 表示永久）")
 	workers := flag.Int("workers", 8, "详情解析并发数")
 	maxItems := flag.Int("max-items", store.DefaultMaxItems, "映射最大条数")
@@ -74,11 +77,11 @@ func main() {
 	st := store.New(store.Options{
 		File:      file,
 		ListTTL:   *listTTL,
-		VideoTTL:  *videoTTL,
 		Keep:      *keep,
 		Workers:   *workers,
 		MaxItems:  *maxItems,
 		DeepPages: *maxPages,
+		Lazy:      *lazy,
 		Providers: sites(),
 	})
 	if err := st.Load(); err != nil {
@@ -109,8 +112,8 @@ func main() {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("serving on %s (version=%s, root=%s, store=%s, refresh=%s, workers=%d, max-items=%d, max-pages=%d, rate-limit=%d/min, proxy=%v)",
-		*addr, version, *root, file, *listTTL, *workers, *maxItems, *maxPages, *rateLimit, *proxyOn)
+	log.Printf("serving on %s (version=%s, root=%s, store=%s, refresh=%s, workers=%d, max-items=%d, max-pages=%d, rate-limit=%d/min, proxy=%v, lazy=%v)",
+		*addr, version, *root, file, *listTTL, *workers, *maxItems, *maxPages, *rateLimit, *proxyOn, *lazy)
 
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

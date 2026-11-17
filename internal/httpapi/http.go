@@ -38,6 +38,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/sources", s.handleSources)
 	mux.HandleFunc("/api/items", s.handleItems)
+	mux.HandleFunc("/api/resolve", s.handleResolve)
 	if s.ProxyEnabled {
 		mux.HandleFunc(proxyPrefix, s.handleProxy)
 	}
@@ -128,9 +129,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"pages":         pages,
 		"pending":       pending,
 		"refresh_every": s.Store.ListTTL().String(),
-		"video_ttl":     s.Store.VideoTTL().String(),
 		"proxy":         s.ProxyEnabled,
 		"sites":         s.Store.Providers(),
+		// 懒加载：默认不主动抓详情，直链等播放时按需解析
+		"lazy":      s.Store.Lazy(),
+		"site_sync": s.Store.SiteSyncs(),
 		// 限流观测：每主机每分钟配额与当前窗口内用量
 		"rate_limit": siteutil.Default.Limit(),
 		"rate_usage": siteutil.Default.UsageAll(),
@@ -149,6 +152,40 @@ func (s *Server) handleItems(w http.ResponseWriter, _ *http.Request) {
 		items = []store.Item{}
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+// handleResolve 按需重解析一条，供前端「直链播放失败」时调用。
+//
+// 参数：site（可省略，默认站点）、id（必填）。
+// 返回 {item, changed, waited}：changed=true 表示换到了新地址，前端直接重播；
+// changed=false 时前端应回落到网页播放页或提示失败。
+//
+// 这是懒加载策略的入口：后台不再按 TTL 批量续签，只有真的播不动才解析。
+func (s *Server) handleResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+	query := r.URL.Query()
+	id := strings.TrimSpace(query.Get("id"))
+	if id == "" {
+		http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+		return
+	}
+	site := strings.TrimSpace(query.Get("site"))
+
+	res := s.Store.Repair(site, id)
+	// 站点未知时条目为空：明确报错，避免前端以为解析成功。
+	if res.Item.ID == "" && res.Item.Title == "" && res.Item.PlayURL == "" {
+		http.Error(w, `{"error":"unknown item"}`, http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"item":    res.Item,
+		"changed": res.Changed,
+		"waited":  res.Waited,
+	})
 }
 
 // writeJSON 输出 JSON 响应（不转义 HTML 字符）。

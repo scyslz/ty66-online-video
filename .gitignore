@@ -17,3 +17,4 @@
 
 # 数据备份
 /store.json.*
+/server_ys.log.*

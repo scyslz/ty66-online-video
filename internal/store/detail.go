@@ -1,11 +1,15 @@
 package store
 
 // 本文件是详情流水线：worker 从队列取 itemKey，解析播放地址并增量写回映射。
+//
+// 直链采用「懒加载」策略：
+//   - 已经解析出直链的条目，后台不会因为时间久了就重新请求；
+//   - 只有「还没拿到直链」的条目才会进队列；
+//   - 播放时旧直链失效，由前端调用 Repair 按需重解析（见 repair.go）。
 
 import (
 	"context"
 	"sync"
-	"time"
 
 	"paresevideo/internal/provider"
 )
@@ -31,7 +35,10 @@ func (s *Store) detailLoop(ctx context.Context) {
 }
 
 // resolveOne 解析单条详情并增量写回。
-// 已解析完成的条目直接跳过；正在解析的条目不会重复请求。
+//
+// 只要已经有直链就直接跳过：直链是否还有效，交给播放时的按需修复判断，
+// 后台不再按 TTL 批量续签（那样会白白打上游，还会把失败当成功写回）。
+// 正在解析的条目不会重复请求。
 func (s *Store) resolveOne(key string) {
 	s.mu.Lock()
 	it, ok := s.items[key]
@@ -46,23 +53,19 @@ func (s *Store) resolveOne(key string) {
 		s.mu.Unlock()
 		return
 	}
-	site, _ := splitKey(key)
-	if site == "" {
-		site = s.defSite
-	}
-	cur := *it
-	// 已解析出可播放直链且签名未过期的，不再请求。
-	// 只有网页播放页（/embed/...）的条目要再解析一次，才能挖出里面的直链。
-	if provider.IsMediaURL(cur.PlayURL) && cur.RetryAt == 0 &&
-		(cur.UpdatedAt == 0 || time.Since(time.Unix(cur.UpdatedAt, 0)) <= s.videoTTL) {
+	if provider.IsMediaURL(it.PlayURL) {
 		delete(s.pending, key)
 		s.mu.Unlock()
 		return
 	}
+	site, _ := splitKey(key)
+	if site == "" {
+		site = s.defSite
+	}
 	s.inflight[key] = true
+	p := s.provider(site)
 	s.mu.Unlock()
 
-	p := s.provider(site)
 	if p == nil {
 		s.mu.Lock()
 		delete(s.pending, key)
@@ -71,23 +74,47 @@ func (s *Store) resolveOne(key string) {
 		return
 	}
 
-	stale := cur.UpdatedAt > 0 && time.Since(time.Unix(cur.UpdatedAt, 0)) > s.videoTTL
+	// 条目级串行：按需修复（Repair）与后台解析不会同时对同一条发请求。
+	lk := s.keyLock(key)
+	lk.Lock()
+	defer lk.Unlock()
+
+	// 拿到锁后重新取一次：期间可能已经被按需修复完成。
+	s.mu.Lock()
+	cur, ok := s.items[key]
+	if !ok || provider.IsMediaURL(cur.PlayURL) {
+		delete(s.pending, key)
+		delete(s.inflight, key)
+		s.mu.Unlock()
+		return
+	}
+	in := *cur
+	s.mu.Unlock()
 
 	var out Item
-	// 两种情况可以只打一次播放页就换到直链，省掉详情页请求：
-	//   - 直链快过期，换新签名
-	//   - 目前只有嵌入页地址（/embed/...），还没挖出里面的直链
-	if cur.PlayPage != "" && (stale || !provider.IsMediaURL(cur.PlayURL)) {
-		if v, ok := p.Refresh(cur); ok {
+	// 只有网页播放页（/embed/...）时，只打一次播放页就能换到直链，省掉详情页请求。
+	if in.PlayPage != "" && !provider.IsMediaURL(in.PlayURL) {
+		if v, ok := p.Refresh(in); ok {
 			out = v
 		} else {
-			out = p.Enrich(cur)
+			out = p.Enrich(in)
 		}
 	} else {
-		out = p.Enrich(cur)
+		out = p.Enrich(in)
 	}
 	out.Site = site
 	s.finish(key, out)
+}
+
+// needsResolve 判断条目是否仍缺少直链（已解析出的直链不再后台重抓）。
+func (s *Store) needsResolve(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok := s.items[key]
+	if !ok {
+		return false
+	}
+	return !provider.IsMediaURL(it.PlayURL)
 }
 
 // finish 把解析结果写回映射并出队。
