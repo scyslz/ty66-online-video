@@ -12,6 +12,7 @@ import (
 // 返回时会把内存中的数据落盘。
 func (s *Store) Run(ctx context.Context) {
 	go s.listLoop(ctx)
+	go s.listWorkers(ctx)
 	go s.detailLoop(ctx)
 	go s.saveLoop(ctx)
 

@@ -1,4 +1,4 @@
-package upstream
+package t66y
 
 import (
 	"fmt"
@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"paresevideo/internal/provider"
 )
 
 // Fake 模拟上游站点：列表页、帖子页与播放器接口。
@@ -14,16 +16,21 @@ type Fake struct {
 	mu      sync.Mutex
 	pages   map[int][]string  // page -> detail ids（顺序即列表顺序）
 	threads map[string]string // id -> 播放页 URL
+	embeds  map[string]string // embed id -> 嵌入页直链（测试 /embed/<id>）
 	lists   int               // 列表页请求次数
 	details int               // 详情页请求次数
 	api     int               // 播放器接口请求次数
 	broken  map[string]bool   // 返回 403 的详情页
+
+	base         string // 假站点根地址，Start 后可用
+	embedsServed int    // 嵌入页请求次数
 }
 
 func NewFake() *Fake {
 	return &Fake{
 		pages:   make(map[int][]string),
 		threads: make(map[string]string),
+		embeds:  make(map[string]string),
 		broken:  make(map[string]bool),
 	}
 }
@@ -40,7 +47,11 @@ func (f *Fake) listHTML(page int) string {
 
 func (f *Fake) threadHTML(id string) string {
 	target := strings.ReplaceAll(f.threads[id], ".", "___")
-	return fmt.Sprintf(`<html><body><a href="https://2023.redircdn.com/?%s&aff=caoliu&popup=1&z">點擊這里打開新視窗</a></body></html>`, target)
+	sep := "?"
+	if strings.Contains(target, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf(`<html><body><a href="https://2023.redircdn.com/?%s%saff=caoliu&popup=1&z">點擊這里打開新視窗</a></body></html>`, target, sep)
 }
 
 func (f *Fake) Handler(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +76,22 @@ func (f *Fake) Handler(w http.ResponseWriter, r *http.Request) {
 		}
 		f.details++
 		fmt.Fprint(w, f.threadHTML(id))
+	case strings.HasPrefix(r.URL.Path, "/embed/"):
+		f.embedsServed++
+		id := strings.TrimPrefix(r.URL.Path, "/embed/")
+		video, ok := f.embeds[id]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprintf(w, `<html><head><script src="/player/kt_player.js"></script></head><body>
+<div id="kt_player"></div>
+<script type="text/javascript">
+	var flashvars = { embed_mode: '1', video_id: '%s', video_url_hd: '1',
+		video_url: '%s', postfix: '.mp4', video_url_text: '普通清晰度',
+		video_alt_url: 'https://ads.example.com/' };
+	kt_player('kt_player', '/player/kt_player.swf', '100%%', '100%%', flashvars);
+</script></body></html>`, id, video)
 	case r.URL.Path == "/videos/playerurl":
 		f.api++
 		id := r.URL.Query().Get("id")
@@ -97,6 +124,20 @@ func (f *Fake) SetThread(id, playPage string) {
 	f.threads[id] = playPage
 }
 
+// SetEmbed 为某个帖子准备一个 /embed/<id> 网页播放页，并登记其直链。
+func (f *Fake) SetEmbed(id, videoURL string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.embeds[id] = videoURL
+	base := f.base
+	if base == "" {
+		// Start 之前调用：先登记，Start 时再补地址。
+		f.threads[id] = "PLACEHOLDER/embed/" + id
+		return
+	}
+	f.threads[id] = base + "/embed/" + id
+}
+
 // Break 让某个详情页返回 403。
 func (f *Fake) Break(id string, broken bool) {
 	f.mu.Lock()
@@ -111,13 +152,36 @@ func (f *Fake) Counts() (lists, details, api int) {
 	return f.lists, f.details, f.api
 }
 
-// Start 启动假上游，并把 upstream 的地址指向它。
-func (f *Fake) Start(t *testing.T) {
+// EmbedCount 返回嵌入页请求次数。
+func (f *Fake) EmbedCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.embedsServed
+}
+
+// Start 启动假上游，返回指向它的 Site 实例。
+func (f *Fake) Start(t *testing.T) *Site {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(f.Handler))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.Handler(w, r)
+	}))
 	t.Cleanup(srv.Close)
 
-	oldSite, oldAPI := SiteBase, APIBase
-	SiteBase, APIBase = srv.URL+"/", srv.URL
-	t.Cleanup(func() { SiteBase, APIBase = oldSite, oldAPI })
+	cfg := DefaultConfig()
+	cfg.SiteBase = srv.URL + "/"
+	cfg.APIBase = srv.URL
+	s := New(cfg)
+	f.mu.Lock()
+	f.base = srv.URL
+	// 把 Start 前登记过的占位符换成真实地址。
+	for id := range f.embeds {
+		if strings.Contains(f.threads[id], "PLACEHOLDER") {
+			f.threads[id] = srv.URL + "/embed/" + id
+		}
+	}
+	f.mu.Unlock()
+	return s
 }
+
+// 确保 Fake 构造出的 Site 满足接口约定。
+var _ provider.Provider = (*Site)(nil)

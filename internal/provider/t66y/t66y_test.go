@@ -1,8 +1,11 @@
-package upstream
+package t66y
 
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"paresevideo/internal/provider"
 )
 
 func TestThreadID(t *testing.T) {
@@ -18,20 +21,6 @@ func TestThreadID(t *testing.T) {
 	}
 }
 
-func TestNormalizeSource(t *testing.T) {
-	cases := map[string]string{
-		"www.99jj23.com":     "99jj23.com",
-		"  WWW.Example.COM ": "example.com",
-		"yuese99.com":        "yuese99.com",
-		"":                   "",
-	}
-	for in, want := range cases {
-		if got := NormalizeSource(in); got != want {
-			t.Errorf("NormalizeSource(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // 列表页应解析出 id、标题与时长，并跳过无时长的行。
 func TestParseList(t *testing.T) {
 	html := `<table>
@@ -40,7 +29,7 @@ func TestParseList(t *testing.T) {
 <tr class="tr3 t_one tac"><td><h3><a href="/htm_data/2611/22/103.html">带转义 &amp; 符号 [01:02:03]</a></h3></td></tr>
 </table>`
 
-	items := parseList(html)
+	items := New(DefaultConfig()).parseList(html)
 	if len(items) != 2 {
 		t.Fatalf("应解析出 2 条，得到 %d: %+v", len(items), items)
 	}
@@ -86,9 +75,9 @@ func TestExtractPlay(t *testing.T) {
 func TestEnrich(t *testing.T) {
 	f := NewFake()
 	f.SetPage(1, "201")
-	f.Start(t)
+	site := f.Start(t)
 
-	items, err := FetchList(1)
+	items, err := site.FetchList(1)
 	if err != nil {
 		t.Fatalf("抓列表: %v", err)
 	}
@@ -96,7 +85,7 @@ func TestEnrich(t *testing.T) {
 		t.Fatalf("应有 1 条，得到 %d", len(items))
 	}
 
-	out := Enrich(items[0])
+	out := site.Enrich(items[0])
 	if !out.Resolved {
 		t.Fatalf("应解析出直链: %+v", out)
 	}
@@ -112,7 +101,7 @@ func TestEnrich(t *testing.T) {
 
 	// 帖子页没有播放链接
 	f.SetThread("201", "")
-	noLink := Enrich(items[0])
+	noLink := site.Enrich(items[0])
 	if noLink.PlayURL != "" {
 		t.Errorf("无播放链接时不应有地址: %q", noLink.PlayURL)
 	}
@@ -129,14 +118,14 @@ func TestEnrichHTTPFailureBackoff(t *testing.T) {
 	f := NewFake()
 	f.SetPage(1, "301")
 	f.Break("301", true)
-	f.Start(t)
+	site := f.Start(t)
 
-	items, err := FetchList(1)
+	items, err := site.FetchList(1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	first := Enrich(items[0])
+	first := site.Enrich(items[0])
 	if first.Error == "" {
 		t.Fatal("403 应记录错误")
 	}
@@ -145,8 +134,9 @@ func TestEnrichHTTPFailureBackoff(t *testing.T) {
 		t.Errorf("首次失败应约 10 分钟后重试，实际 %d 秒", firstWait)
 	}
 
-	// 多次失败后间隔应增长
-	second := Enrich(first)
+	// 多次失败后间隔应增长（等闸门放行，否则会被节流挡回）
+	time.Sleep(150 * time.Millisecond)
+	second := site.Enrich(first)
 	secondWait := second.RetryAt - second.UpdatedAt
 	if secondWait <= firstWait {
 		t.Errorf("连续失败应退避增长：%d -> %d", firstWait, secondWait)
@@ -157,13 +147,13 @@ func TestEnrichHTTPFailureBackoff(t *testing.T) {
 func TestRefreshUsesPlayPage(t *testing.T) {
 	f := NewFake()
 	f.SetPage(1, "401")
-	f.Start(t)
+	site := f.Start(t)
 
-	items, _ := FetchList(1)
-	enriched := Enrich(items[0])
+	items, _ := site.FetchList(1)
+	enriched := site.Enrich(items[0])
 	_, detailsBefore, apiBefore := f.Counts()
 
-	refreshed, ok := Refresh(enriched)
+	refreshed, ok := site.Refresh(enriched)
 	if !ok {
 		t.Fatal("应能用播放页换新签名")
 	}
@@ -180,7 +170,98 @@ func TestRefreshUsesPlayPage(t *testing.T) {
 	}
 
 	// 没有播放页时无法只换签名
-	if _, ok := Refresh(Item{ID: "x"}); ok {
+	if _, ok := site.Refresh(provider.Item{ID: "x"}); ok {
 		t.Error("没有播放页时应返回 false")
+	}
+}
+
+// 嵌入型播放页（/embed/<id>）应从 flashvars 的 video_url 里取出直链。
+func TestEnrichEmbedPage(t *testing.T) {
+	f := NewFake()
+	f.SetPage(1, "401")
+	site := f.Start(t)
+	f.SetEmbed("401", "https://fccw55.com/get_file/1/abc/109000/109853/109853.mp4/?embed=true")
+
+	items, err := site.FetchList(1)
+	if err != nil {
+		t.Fatalf("抓列表: %v", err)
+	}
+	out := site.Enrich(items[0])
+	if !out.Resolved {
+		t.Fatalf("嵌入页应解析出直链: %+v", out)
+	}
+	if !strings.Contains(out.PlayURL, "109853.mp4") {
+		t.Errorf("直链错误: %q", out.PlayURL)
+	}
+	if out.Error != "" {
+		t.Errorf("成功时不应有错误: %q", out.Error)
+	}
+}
+
+// 嵌入页解析：只认 video_url，不能误取 video_url_hd / video_alt_url。
+func TestExtractEmbedVideo(t *testing.T) {
+	page := `<script>var flashvars = {
+		video_url_hd: '1',
+		video_url: 'https://cdn.example.com/get_file/1/x/1/2/2.mp4/?embed=true',
+		video_alt_url: 'https://ads.example.com/',
+		postfix: '.mp4' };</script>`
+	got := extractEmbedVideo(page, "https://www.99jj23.com/embed/2")
+	if got != "https://cdn.example.com/get_file/1/x/1/2/2.mp4/?embed=true" {
+		t.Fatalf("提取错误: %q", got)
+	}
+
+	// 相对路径应按播放页补齐
+	rel := `<script>video_url: '/get_file/1/x/1/2/2.mp4?embed=true'</script>`
+	if got := extractEmbedVideo(rel, "https://fccw55.com/embed/109853"); got != "https://fccw55.com/get_file/1/x/1/2/2.mp4?embed=true" {
+		t.Errorf("相对路径补齐错误: %q", got)
+	}
+
+	// 广告地址、缺字段都应为空
+	if got := extractEmbedVideo(`<script>video_alt_url: 'https://ads.example.com/a.mp4'</script>`, "https://x.com/embed/1"); got != "" {
+		t.Errorf("不应取广告地址: %q", got)
+	}
+	if got := extractEmbedVideo(`<html>nothing</html>`, "https://x.com/embed/1"); got != "" {
+		t.Errorf("无字段时应为空: %q", got)
+	}
+}
+
+// isEmbedPage 只认 /embed/ 路径。
+func TestIsEmbedPage(t *testing.T) {
+	cases := map[string]bool{
+		"https://www.99jj23.com/embed/169074":     true,
+		"https://fccw55.com/embed/109853?x=1":     true,
+		"https://yuese99.com/video.html?id=83193": false,
+		"https://www.99jj23.com/embedding/169074": false,
+		"": false,
+	}
+	for in, want := range cases {
+		if got := isEmbedPage(in); got != want {
+			t.Errorf("isEmbedPage(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// IsMediaURL（provider 包）要认得出 /get_file/.../169074.mp4/?embed=true 这类地址。
+func TestIsMediaURL(t *testing.T) {
+	yes := []string{
+		"https://videos.js-static.cc/hls/contents/videos/89000/89686/89686.mp4/list.m3u8?k=1&t=2",
+		"https://www.99jj23.com/get_file/3/abc/169000/169074/169074.mp4/?embed=true",
+		"https://fccw55.com/get_file/1/x/109000/109853/109853.mp4",
+		"https://cdn.example.com/a.mp4?token=1",
+	}
+	for _, u := range yes {
+		if !provider.IsMediaURL(u) {
+			t.Errorf("应识别为媒体地址: %s", u)
+		}
+	}
+	no := []string{
+		"https://www.99jj23.com/embed/169074",
+		"https://yuese99.com/video.html?id=83193",
+		"",
+	}
+	for _, u := range no {
+		if provider.IsMediaURL(u) {
+			t.Errorf("不应识别为媒体地址: %s", u)
+		}
 	}
 }

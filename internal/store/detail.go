@@ -1,16 +1,16 @@
 package store
 
-// 本文件是详情流水线：worker 从队列取 id，解析播放地址并增量写回映射。
+// 本文件是详情流水线：worker 从队列取 itemKey，解析播放地址并增量写回映射。
 
 import (
 	"context"
 	"sync"
 	"time"
 
-	"paresevideo/internal/upstream"
+	"paresevideo/internal/provider"
 )
 
-// detailLoop 启动一组 worker 消费队列：取 id → 解析 → 写回映射。
+// detailLoop 启动一组 worker 消费队列：取 key → 解析 → 写回映射。
 func (s *Store) detailLoop(ctx context.Context) {
 	var wg sync.WaitGroup
 	for i := 0; i < s.workers; i++ {
@@ -21,8 +21,8 @@ func (s *Store) detailLoop(ctx context.Context) {
 				select {
 				case <-ctx.Done():
 					return
-				case id := <-s.queue:
-					s.resolveOne(id)
+				case key := <-s.queue:
+					s.resolveOne(key)
 				}
 			}
 		}()
@@ -32,55 +32,72 @@ func (s *Store) detailLoop(ctx context.Context) {
 
 // resolveOne 解析单条详情并增量写回。
 // 已解析完成的条目直接跳过；正在解析的条目不会重复请求。
-func (s *Store) resolveOne(id string) {
+func (s *Store) resolveOne(key string) {
 	s.mu.Lock()
-	it, ok := s.items[id]
+	it, ok := s.items[key]
 	if !ok {
-		delete(s.pending, id)
+		delete(s.pending, key)
 		s.mu.Unlock()
 		return
 	}
-	if s.inflight[id] {
+	if s.inflight[key] {
 		// 已有 worker 在处理这条，直接出队即可，避免重复请求。
-		delete(s.pending, id)
+		delete(s.pending, key)
 		s.mu.Unlock()
 		return
+	}
+	site, _ := splitKey(key)
+	if site == "" {
+		site = s.defSite
 	}
 	cur := *it
-	// 已解析出结果且签名未过期的，不再请求。
-	if cur.PlayURL != "" && cur.RetryAt == 0 &&
+	// 已解析出可播放直链且签名未过期的，不再请求。
+	// 只有网页播放页（/embed/...）的条目要再解析一次，才能挖出里面的直链。
+	if provider.IsMediaURL(cur.PlayURL) && cur.RetryAt == 0 &&
 		(cur.UpdatedAt == 0 || time.Since(time.Unix(cur.UpdatedAt, 0)) <= s.videoTTL) {
-		delete(s.pending, id)
+		delete(s.pending, key)
 		s.mu.Unlock()
 		return
 	}
-	s.inflight[id] = true
+	s.inflight[key] = true
 	s.mu.Unlock()
+
+	p := s.provider(site)
+	if p == nil {
+		s.mu.Lock()
+		delete(s.pending, key)
+		delete(s.inflight, key)
+		s.mu.Unlock()
+		return
+	}
 
 	stale := cur.UpdatedAt > 0 && time.Since(time.Unix(cur.UpdatedAt, 0)) > s.videoTTL
 
 	var out Item
-	if stale && cur.PlayPage != "" {
-		// 直链快过期：优先只打播放器接口换新签名，省掉一次详情页请求。
-		if v, ok := upstream.Refresh(cur); ok {
+	// 两种情况可以只打一次播放页就换到直链，省掉详情页请求：
+	//   - 直链快过期，换新签名
+	//   - 目前只有嵌入页地址（/embed/...），还没挖出里面的直链
+	if cur.PlayPage != "" && (stale || !provider.IsMediaURL(cur.PlayURL)) {
+		if v, ok := p.Refresh(cur); ok {
 			out = v
 		} else {
-			out = upstream.Enrich(cur)
+			out = p.Enrich(cur)
 		}
 	} else {
-		out = upstream.Enrich(cur)
+		out = p.Enrich(cur)
 	}
-	s.finish(id, out)
+	out.Site = site
+	s.finish(key, out)
 }
 
 // finish 把解析结果写回映射并出队。
-func (s *Store) finish(id string, out Item) {
+func (s *Store) finish(key string, out Item) {
 	s.mu.Lock()
-	if cur, ok := s.items[id]; ok {
+	if cur, ok := s.items[key]; ok {
 		copyPlayback(cur, &out)
 	}
-	delete(s.pending, id)
-	delete(s.inflight, id)
+	delete(s.pending, key)
+	delete(s.inflight, key)
 	s.mu.Unlock()
 	s.markDirty()
 }

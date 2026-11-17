@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"paresevideo/internal/provider/siteutil"
 	"paresevideo/internal/store"
 )
 
@@ -17,10 +19,18 @@ import (
 type Server struct {
 	Store *store.Store
 	Root  string // 磁盘上的静态目录；为空或没有 index.html 时用内嵌页面
+	Proxy *proxy // 线路二：视频同源代理（由 Routes 惰性初始化）
+	// ProxyEnabled 为 false 时不注册 /api/proxy 路由，页面也不显示“线路二”。
+	ProxyEnabled bool
 }
 
 // Routes 注册所有路由。
 func (s *Server) Routes() http.Handler {
+	if s.ProxyEnabled {
+		if s.Proxy == nil {
+			s.Proxy = newProxy(s.Store)
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/scrape", s.handleScrape)
 	mux.HandleFunc("/api/pages", s.handlePages)
@@ -28,13 +38,17 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/sources", s.handleSources)
 	mux.HandleFunc("/api/items", s.handleItems)
+	if s.ProxyEnabled {
+		mux.HandleFunc(proxyPrefix, s.handleProxy)
+	}
 	mux.Handle("/", assetHandler(s.Root))
 	return mux
 }
 
 // handleScrape 返回按条数窗口切片的列表。
 //
-// 参数：offset（默认 0）、limit（默认 24，最大 500）、source（按来源过滤）；
+// 参数：offset（默认 0）、limit（默认 24，最大 500）、source（按来源域名过滤）、
+// site（按站点过滤，多站部署时用）；
 // refresh=1 强制先同步第一页。兼容旧参数 page：换算为 offset=(page-1)*24。
 func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
@@ -52,12 +66,13 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 	}
 
 	source := store.NormalizeSource(query.Get("source"))
+	site := strings.TrimSpace(query.Get("site"))
 
 	if query.Get("refresh") == "1" {
-		s.Store.RequestSync(1)
+		s.Store.RequestSyncSite(site, 1)
 	}
 
-	win := s.Store.FillWindowSource(offset, limit, source)
+	win := s.Store.FillWindowQuery(offset, limit, source, site)
 	items := win.Items
 	if items == nil {
 		items = []store.Item{}
@@ -67,16 +82,24 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 		"offset":  offset,
 		"limit":   limit,
 		"source":  source,
+		"site":    site,
 		"total":   win.Total,
 		"count":   len(items),
 		"items":   items,
 		"pending": win.Pending,
+		// loading: 后台正在补页，前端可稍后重试一次
+		// has_more: 还有站点没到最后一页，理论上能取到更多
+		"loading":  win.Loading,
+		"has_more": win.HasMore,
 	})
 }
 
 // handlePages 返回已缓存的上游页号。
 func (s *Server) handlePages(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"cached": s.Store.CachedPages()})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cached":  s.Store.CachedPages(),
+		"by_site": s.Store.CachedPagesBySite(),
+	})
 }
 
 // handleMap 输出完整的 id → 视频地址映射。
@@ -106,6 +129,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"pending":       pending,
 		"refresh_every": s.Store.ListTTL().String(),
 		"video_ttl":     s.Store.VideoTTL().String(),
+		"proxy":         s.ProxyEnabled,
+		"sites":         s.Store.Providers(),
+		// 限流观测：每主机每分钟配额与当前窗口内用量
+		"rate_limit": siteutil.Default.Limit(),
+		"rate_usage": siteutil.Default.UsageAll(),
 	}
 	if !lastList.IsZero() {
 		resp["last_list_sync"] = lastList.Unix()

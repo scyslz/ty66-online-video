@@ -19,22 +19,43 @@ import (
 	"time"
 
 	"paresevideo/internal/httpapi"
+	"paresevideo/internal/provider"
+	"paresevideo/internal/provider/siteutil"
+	"paresevideo/internal/provider/t66y"
+	"paresevideo/internal/provider/ys"
 	"paresevideo/internal/store"
 )
 
 // version 由构建时注入（-ldflags "-X main.version=..."）。
 var version = "dev"
 
+// sites 返回要接入的来源站点，按展示优先级排列。
+//
+// 新增站点的做法：
+//  1. 在 internal/provider/ 下新建子包，实现 provider.Provider
+//  2. 在这里追加上去（第一个站点同时作为旧数据的归属站点）
+//
+// 站点之间互不影响：各自的列表页、详情页、播放地址解析都在自己的包里。
+func sites() []provider.Provider {
+	return []provider.Provider{
+		t66y.New(t66y.DefaultConfig()),
+		ys.New(ys.DefaultConfig()),
+	}
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号并退出")
 	root := flag.String("root", ".", "静态文件目录（没有 index.html 时使用内嵌页面）")
 	addr := flag.String("addr", ":8000", "监听地址")
 	storePath := flag.String("store", "", "映射文件路径（默认 <root>/store.json）")
-	listTTL := flag.Duration("refresh", 15*time.Minute, "上游列表同步间隔")
+	listTTL := flag.Duration("refresh", 3*time.Hour, "上游列表同步间隔")
 	videoTTL := flag.Duration("video-ttl", 6*time.Hour, "直链有效期，超时后换新签名")
 	keep := flag.Duration("keep", 30*24*time.Hour, "下架映射保留时长（0 表示永久）")
 	workers := flag.Int("workers", 8, "详情解析并发数")
 	maxItems := flag.Int("max-items", store.DefaultMaxItems, "映射最大条数")
+	maxPages := flag.Int("max-pages", 30, "单站点最多深挖到第几页（防止翻尾时把上游全站抓一遍）")
+	rateLimit := flag.Int("rate-limit", 60, "每主机每分钟最多请求数（滑动窗口，0 表示不限）")
+	proxyOn := flag.Bool("proxy", true, "是否启用视频代理（线路二）；关闭后页面不显示线路二")
 	flag.Parse()
 
 	if *showVersion {
@@ -42,18 +63,23 @@ func main() {
 		return
 	}
 
+	// 全局限流：所有出站请求都按「每主机每分钟 N 次」控制。
+	siteutil.Default.SetLimit(*rateLimit)
+
 	file := *storePath
 	if file == "" {
 		file = filepath.Join(*root, "store.json")
 	}
 
 	st := store.New(store.Options{
-		File:     file,
-		ListTTL:  *listTTL,
-		VideoTTL: *videoTTL,
-		Keep:     *keep,
-		Workers:  *workers,
-		MaxItems: *maxItems,
+		File:      file,
+		ListTTL:   *listTTL,
+		VideoTTL:  *videoTTL,
+		Keep:      *keep,
+		Workers:   *workers,
+		MaxItems:  *maxItems,
+		DeepPages: *maxPages,
+		Providers: sites(),
 	})
 	if err := st.Load(); err != nil {
 		log.Fatalf("[Init] %v", err)
@@ -67,7 +93,7 @@ func main() {
 
 	st.Run(ctx)
 
-	srv := &httpapi.Server{Store: st, Root: *root}
+	srv := &httpapi.Server{Store: st, Root: *root, ProxyEnabled: *proxyOn}
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Routes(),
@@ -83,8 +109,8 @@ func main() {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	log.Printf("serving on %s (version=%s, root=%s, store=%s, refresh=%s, workers=%d, max-items=%d)",
-		*addr, version, *root, file, *listTTL, *workers, *maxItems)
+	log.Printf("serving on %s (version=%s, root=%s, store=%s, refresh=%s, workers=%d, max-items=%d, max-pages=%d, rate-limit=%d/min, proxy=%v)",
+		*addr, version, *root, file, *listTTL, *workers, *maxItems, *maxPages, *rateLimit, *proxyOn)
 
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)

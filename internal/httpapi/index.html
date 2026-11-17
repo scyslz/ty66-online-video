@@ -480,6 +480,28 @@ main {
   border: 1px solid rgba(16, 185, 129, 0.3);
   z-index: 2;
 }
+.v-site-tag {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.62);
+  color: #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  z-index: 3;
+  max-width: 72px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+[data-theme="light"] .v-site-tag {
+  background: rgba(255, 255, 255, 0.88);
+  color: #334155;
+  border-color: rgba(15, 23, 42, 0.12);
+}
 
 /* 卡片文本内容 */
 .v-body {
@@ -726,6 +748,40 @@ main {
 }
 .modal-ext-btn:hover {
   text-decoration: underline;
+}
+
+/* 线路切换（线路一 直连 / 线路二 服务器代理） */
+.line-switch {
+  display: inline-flex;
+  align-items: center;
+  background: var(--modal-close-bg);
+  border: 1px solid var(--modal-border);
+  border-radius: 4px;
+  padding: 1px;
+  gap: 1px;
+  flex-shrink: 0;
+}
+.line-switch button {
+  border: 0;
+  background: transparent;
+  color: var(--modal-close-color);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+.line-switch button:hover { color: var(--text); }
+.line-switch button.active {
+  background: var(--primary);
+  color: #040812;
+  font-weight: 600;
+}
+.line-switch[data-line="proxy"] button.active {
+  background: #a78bfa;
+  color: #140b2e;
 }
 
 .modal-close-btn, .modal-icon-btn {
@@ -1013,6 +1069,9 @@ main {
         <input type="text" id="searchInput" placeholder="搜索关键词...">
         <button class="search-clear" id="searchClear">✕</button>
       </div>
+      <select id="siteSelect" class="domain-select" title="按站点过滤" style="display:none">
+        <option value="">全部站点</option>
+      </select>
       <select id="sourceSelect" class="domain-select" title="按来源过滤">
         <option value="">全部来源</option>
       </select>
@@ -1064,6 +1123,10 @@ main {
     <div class="modal-bar">
       <div id="mtitle">视频标题</div>
       <div class="modal-btns">
+        <div class="line-switch" id="lineSwitch" data-line="direct" style="display:none" title="线路一 直连原始视频；线路二 经服务器代理">
+          <button type="button" data-line="direct" onclick="setPlayLine('direct')">线路一</button>
+          <button type="button" data-line="proxy" onclick="setPlayLine('proxy')">线路二</button>
+        </div>
         <a id="mopen" target="_blank" rel="noopener" class="modal-ext-btn">原网页 ↗</a>
         <!-- 全屏按钮 (叉号左边) -->
         <button id="modalFsBtn" class="modal-icon-btn" onclick="toggleFullscreen()" title="全屏 (F)">
@@ -1098,6 +1161,7 @@ main {
         <div class="error-desc" id="playerErrorDesc">视频源连接中断或格式不支持直接播放</div>
         <div class="error-btns">
           <button class="btn-retry" onclick="retryVideo()">重新加载 ↻</button>
+          <button class="btn-retry" id="playerErrorLineBtn" onclick="switchLineOnError()" style="display:none">切换线路 ↺</button>
           <a id="playerErrorExtBtn" target="_blank" rel="noopener" class="btn-ext">原网页打开 ↗</a>
         </div>
       </div>
@@ -1227,7 +1291,11 @@ const ViewHistory = {
   },
 
   getKey(it) {
-    return (it && (it.thread_url || it.play_url || it.title)) || '';
+    if (!it) return '';
+    // 多站点时，同号帖子要靠 site 区分，否则会共享观看进度。
+    const base = it.thread_url || it.play_url || it.title || '';
+    const site = it.site || '';
+    return site ? site + '|' + base : base;
   },
 
   get(it) {
@@ -1269,6 +1337,7 @@ const ViewHistory = {
     if (!it) return null;
     return {
       id: it.id || '',
+      site: it.site || '',
       title: it.title || '',
       duration: it.duration || '',
       thread_url: it.thread_url || '',
@@ -1343,11 +1412,88 @@ let ourPage = 1;                // 当前页 (从1开始)
 let currentFilter = 'all';
 let searchQuery = '';
 let currentSource = '';         // 来源过滤，空表示全部
+let currentSite = '';           // 站点过滤，空表示全部（单站时恒为空）
+let knownSites = [];            // 服务端已接入的站点
 let hlsInstance = null;
 let currentPlayingItem = null;
 let loadTimer = null;
 let lastSaveTime = 0;
 let pendingResumeTime = null;
+
+// 播放线路：direct = 线路一（浏览器直连原始地址），proxy = 线路二（经服务器代理）
+const PLAY_LINE_KEY = 't66y_play_line_v1';
+let playLine = 'direct';
+// 线路二由服务端 -proxy 参数决定，关闭时整组开关都不显示
+let proxyAvailable = false;
+// 本次播放是否已自动切过线路，避免失败后反复来回切换
+let autoSwitchedLine = false;
+
+(function loadPlayLine() {
+  try {
+    const saved = localStorage.getItem(PLAY_LINE_KEY);
+    if (saved === 'direct' || saved === 'proxy') playLine = saved;
+  } catch (e) {}
+})();
+
+// 服务端是否启用了代理（决定了“线路二”是否可见）
+function setProxyAvailable(enabled) {
+  proxyAvailable = !!enabled;
+  const box = document.getElementById('lineSwitch');
+  if (box) box.style.display = proxyAvailable ? 'inline-flex' : 'none';
+
+  if (!proxyAvailable && playLine === 'proxy') {
+    // 服务端关掉了代理，静默回落到直连，避免继续打到不存在的接口
+    playLine = 'direct';
+    try { localStorage.setItem(PLAY_LINE_KEY, 'direct'); } catch (e) {}
+  }
+  syncLineSwitch();
+}
+
+function setPlayLine(line) {
+  if (line !== 'direct' && line !== 'proxy') return;
+  if (line === 'proxy' && !proxyAvailable) return;
+  try { localStorage.setItem(PLAY_LINE_KEY, line); } catch (e) {}
+  if (line === playLine) {
+    syncLineSwitch();
+    return;
+  }
+  playLine = line;
+  syncLineSwitch();
+  autoSwitchedLine = false;
+  if (currentPlayingItem) openPlayer(currentPlayingItem);
+  else showToast(line === 'proxy' ? '已切换到线路二（服务器代理）' : '已切换到线路一（直连）');
+}
+
+function syncLineSwitch() {
+  const box = document.getElementById('lineSwitch');
+  if (!box) return;
+  box.dataset.line = playLine;
+  box.querySelectorAll('button').forEach(b => {
+    b.classList.toggle('active', b.dataset.line === playLine);
+  });
+}
+
+// 代理地址：把原始地址交给同源 /api/proxy，绕开跨域与防盗链。
+function proxiedURL(url) {
+  if (!url) return url;
+  if (url.startsWith('/api/proxy')) return url;
+  return '/api/proxy?url=' + encodeURIComponent(url);
+}
+
+// 按当前线路决定真正用于播放的地址。
+function playbackURL(url) {
+  return (playLine === 'proxy' && proxyAvailable) ? proxiedURL(url) : url;
+}
+
+// 是否为可直接播放的媒体地址。
+// 注意 /get_file/.../169074.mp4/?embed=true 这类地址，“.mp4” 后面跟的是斜杠，
+// 所以不能只认 (\?|$) 结尾。
+function isMediaURL(url) {
+  return /\.(m3u8|mp4)(\?|#|$|\/)/i.test(url || '');
+}
+function isHLSURL(url) {
+  return /\.m3u8(\?|#|$|\/)/i.test(url || '');
+}
 
 const PAGE_SIZE_KEY = 't66y_page_size_v1';
 const PAGE_SIZE_OPTIONS = [12, 24, 36, 48, 60];
@@ -1425,15 +1571,33 @@ function setAppStatus(text, type = 'ready') {
 }
 
 // 从服务端按窗口取数：offset/limit（可带域名过滤），返回 items 与 total。
+// 后台补页时最多轮询几次、每次间隔多久
+const REFILL_INTERVAL = 700;
+const REFILL_MAX_TRIES = 12;
+let refillTimer = null;
+let refillTries = 0;
+
 async function loadWindow(isRefresh = false, keepData = false) {
   if (isFetching) return;
   isFetching = true;
+  clearTimeout(refillTimer);
+  refillTries = 0;
+  try {
+    await fetchWindow(isRefresh, keepData);
+  } finally {
+    isFetching = false;
+  }
+}
+
+// 请求一页数据；若后端正在异步补页，则稍后自动再取一次。
+async function fetchWindow(isRefresh = false, keepData = false) {
   const offset = (ourPage - 1) * pageSize;
-  setAppStatus(allData.length === 0 ? '正在加载数据...' : '正在加载...', 'loading');
+  if (allData.length === 0) setAppStatus('正在加载数据...', 'loading');
 
   try {
     let url = `/api/scrape?offset=${offset}&limit=${pageSize}`;
     if (currentSource) url += `&source=${encodeURIComponent(currentSource)}`;
+    if (currentSite) url += `&site=${encodeURIComponent(currentSite)}`;
     if (isRefresh) url += '&refresh=1';
 
     const res = await fetch(url);
@@ -1442,15 +1606,35 @@ async function loadWindow(isRefresh = false, keepData = false) {
 
     allData = j.items || [];
     serverTotal = j.total || 0;
+    // 后端还有站点在抓下一页：说明数据可能还会变多
+    const refilling = !!j.loading;
+
     if (j.pending > 0) {
       setAppStatus(`就绪 (${j.pending} 条解析中)`, 'ready');
+    } else if (refilling) {
+      setAppStatus('正在加载更多...', 'loading');
     } else {
-      setAppStatus(`就绪`, 'ready');
+      setAppStatus('就绪', 'ready');
     }
+
     // 首次加载后刷新来源下拉
     if (needSourceRefresh) {
       needSourceRefresh = false;
       loadSources();
+    }
+
+    render(refilling);
+
+    // 数据不足且后端仍在补页：隔一会再取，最多重试 REFILL_MAX_TRIES 次
+    if (refilling && refillTries < REFILL_MAX_TRIES) {
+      refillTries++;
+      refillTimer = setTimeout(() => {
+        if (isFetching) return;
+        isFetching = true;
+        fetchWindow(false, true).finally(() => { isFetching = false; });
+      }, REFILL_INTERVAL);
+    } else if (!refilling) {
+      refillTries = 0;
     }
   } catch (e) {
     setAppStatus('加载失败', 'error');
@@ -1458,10 +1642,34 @@ async function loadWindow(isRefresh = false, keepData = false) {
     if (!keepData && allData.length === 0) {
       showToast('数据加载失败，请稍后重试');
     }
-  } finally {
-    isFetching = false;
-    render();
+    render(false);
   }
+}
+
+// 站点下拉：只有接入多个站点时才显示
+function renderSiteSelect(sites) {
+  const sel = document.getElementById('siteSelect');
+  if (!sel) return;
+  knownSites = Array.isArray(sites) ? sites.slice() : [];
+  if (knownSites.length <= 1) {
+    sel.style.display = 'none';
+    currentSite = '';
+    return;
+  }
+  sel.style.display = '';
+  const prev = currentSite;
+  sel.innerHTML = '<option value="">全部站点</option>' + knownSites.map(name =>
+    `<option value="${escAttr(name)}">${esc(name)}</option>`
+  ).join('');
+  if (prev && knownSites.includes(prev)) sel.value = prev;
+  else { sel.value = ''; currentSite = ''; }
+}
+
+// 切换站点过滤：重置到第一页并重新加载
+function setSite(site) {
+  currentSite = (site || '').trim();
+  ourPage = 1;
+  loadWindow();
 }
 
 // 来源下拉：数据来自服务端的来源统计
@@ -1518,13 +1726,13 @@ function getProcessedData() {
   if (currentFilter === 'unwatched') {
     list = list.filter(it => !ViewHistory.isViewed(it));
   } else if (currentFilter === 'resolved') {
-    list = list.filter(it => !!it.resolved || /\.m3u8|\.mp4/i.test(it.play_url || ''));
+    list = list.filter(it => !!it.resolved || isMediaURL(it.play_url));
   }
 
   return list;
 }
 
-function render() {
+function render(refilling = false) {
   document.getElementById('statViewed').textContent = ViewHistory.getCount();
 
   const historyView = isHistoryView();
@@ -1555,7 +1763,9 @@ function render() {
   const container = document.getElementById('contentArea');
 
   if (slice.length === 0) {
-    container.innerHTML = `<div style="padding:50px 0;text-align:center;color:var(--text-dim);font-size:13px">暂无内容</div>`;
+    container.innerHTML = refilling
+      ? `<div style="padding:50px 0;text-align:center;color:var(--text-dim);font-size:13px"><span class="spinner" style="display:inline-block;vertical-align:-8px;margin-right:8px"></span>正在加载更多...</div>`
+      : `<div style="padding:50px 0;text-align:center;color:var(--text-dim);font-size:13px">暂无内容</div>`;
     return;
   }
 
@@ -1565,7 +1775,7 @@ function render() {
     const url = it.play_url || it.play_page || it.redirect_url || '';
     const openUrl = it.play_page || it.redirect_url || it.play_url || '';
     const source = it.source || getDomain(openUrl || url);
-    const isResolved = !!it.resolved || /\.m3u8|\.mp4/i.test(url);
+    const isResolved = !!it.resolved || isMediaURL(url);
     
     // 获取观看历史与具体进度（历史视图的条目自带 _t / progress）
     const viewedData = ViewHistory.get(it);
@@ -1583,10 +1793,14 @@ function render() {
       ? esc(formatRelativeTime(watchedAt))
       : esc(source || '-');
 
+    const siteTag = it.site ? `<span class="v-site-tag" title="${escAttr(it.site)}">${esc(it.site)}</span>` : '';
+    const viewedTagStyle = it.site ? ' style="top:24px"' : '';
+
     html += `
       <div class="v-card ${viewed ? 'is-viewed' : ''}" onclick="onCardPlay(${i})">
         <div class="v-thumb">
-          <span class="v-viewed-tag">${tagText}</span>
+          ${siteTag}
+          <span class="v-viewed-tag"${viewedTagStyle}>${tagText}</span>
           ${isResolved ? '<span class="v-tag-direct">直链</span>' : ''}
           <div class="v-play-icon">
             <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6 3 20 12 6 21 6 3"></polygon></svg>
@@ -1652,6 +1866,12 @@ function retryVideo() {
   if (currentPlayingItem) {
     openPlayer(currentPlayingItem);
   }
+}
+
+// 播放失败面板上的“切换线路”：在两条线路间互换后重试
+function switchLineOnError() {
+  autoSwitchedLine = false;
+  setPlayLine(playLine === 'proxy' ? 'direct' : 'proxy');
 }
 
 // 渲染分页控件：页码窗口 + 首末按钮状态 + 跳转框占位提示
@@ -1760,13 +1980,19 @@ function resetPlayer() {
 }
 
 function openPlayer(it) {
+  // 换一个视频时重置自动切线路的状态；同一视频内部重试则保留
+  if (!currentPlayingItem || currentPlayingItem.id !== it.id || currentPlayingItem.site !== it.site) {
+    autoSwitchedLine = false;
+  }
   currentPlayingItem = it;
   resetPlayer();
   document.body.classList.add('modal-open');
+  syncLineSwitch();
+  document.getElementById('playerErrorLineBtn').style.display = 'none';
 
   const url = it.play_url || it.play_page || it.redirect_url || '';
   const openUrl = it.play_page || it.redirect_url || it.play_url || '';
-  const isMedia = /\.m3u8(\?|$)/i.test(url) || /\.mp4(\?|$)/i.test(url);
+  const isMedia = isMediaURL(url);
 
   document.getElementById('mtitle').textContent = it.title || '播放';
   document.getElementById('mopen').href = openUrl || url || '#';
@@ -1780,15 +2006,38 @@ function openPlayer(it) {
     pendingResumeTime = saved.time;
   }
 
-  showLoading('正在连接视频流...');
+  showLoading(playLine === 'proxy' ? '正在通过服务器代理连接视频流...' : '正在连接视频流...');
 
-  // 16秒超时保护
+  // 失败处理：线路一失败时自动切到线路二重试一次，仍失败才提示
+  const fail = (title, desc) => {
+    clearTimeout(loadTimer);
+    if (proxyAvailable && playLine === 'direct' && !autoSwitchedLine) {
+      autoSwitchedLine = true;
+      playLine = 'proxy';
+      try { localStorage.setItem(PLAY_LINE_KEY, 'proxy'); } catch (e) {}
+      syncLineSwitch();
+      showToast('直连失败，已自动切换到线路二（服务器代理）');
+      openPlayer(currentPlayingItem);
+      return;
+    }
+    if (proxyAvailable && playLine === 'proxy') {
+      autoSwitchedLine = false;
+      document.getElementById('playerErrorLineBtn').style.display = 'inline-flex';
+      showError(title, desc || '服务器代理也没能取到画面，可切回线路一或直接打开原网页。', openUrl || url);
+      return;
+    }
+    showError(title, desc, openUrl || url);
+  };
+
+  // 15 秒超时保护（代理线路多一跳，给到 25 秒）
   loadTimer = setTimeout(() => {
-    showError('加载响应较慢', '源站连接可能存在延迟或跨域限制，建议在新窗口打开原网页播放。', openUrl || url);
-  }, 16000);
+    fail('加载响应较慢', '源站连接可能存在延迟或跨域限制，可以试试切换到另一条线路。');
+  }, playLine === 'proxy' ? 25000 : 15000);
 
   if (isMedia) {
     v.style.display = 'block';
+
+    const src = playbackURL(url);
 
     const onReady = () => {
       clearTimeout(loadTimer);
@@ -1807,10 +2056,7 @@ function openPlayer(it) {
     v.onplaying = onReady;
     v.onloadeddata = onReady;
     v.onwaiting = () => showLoading('正在缓冲数据...');
-    v.onerror = () => {
-      clearTimeout(loadTimer);
-      showError('视频解码或网络异常', '该视频源连接中断或格式不支持直接播放，请使用原网页打开。', openUrl || url);
-    };
+    v.onerror = () => fail('视频解码或网络异常', '该视频源连接中断或格式不支持直接播放，可以试试切换到另一条线路。');
 
     // 播放进度实时保存 (防抖 1.5 秒更新一次)
     v.ontimeupdate = () => {
@@ -1832,9 +2078,9 @@ function openPlayer(it) {
       }
     };
 
-    if (/\.m3u8(\?|$)/i.test(url) && window.Hls && Hls.isSupported()) {
+    if (isHLSURL(url) && window.Hls && Hls.isSupported()) {
       hlsInstance = new Hls({ enableWorker: true, lowLatencyMode: true });
-      hlsInstance.loadSource(url);
+      hlsInstance.loadSource(src);
       hlsInstance.attachMedia(v);
       
       hlsInstance.on(Hls.Events.MANIFEST_LOADED, () => {
@@ -1845,18 +2091,18 @@ function openPlayer(it) {
       });
       hlsInstance.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
-          clearTimeout(loadTimer);
-          showError('直链流加载中断', '该视频源可能已失效或存在防盗链限制，建议使用外链打开。', openUrl || url);
+          fail('直链流加载中断', '该视频源可能已失效或存在防盗链限制，可以试试切换到另一条线路。');
         }
       });
-    } else if (v.canPlayType('application/vnd.apple.mpegurl') || /\.mp4(\?|$)/i.test(url)) {
-      v.src = url;
+    } else if (v.canPlayType('application/vnd.apple.mpegurl') || /\.mp4(\?|#|$|\/)/i.test(url)) {
+      v.src = src;
       v.play().then(onReady).catch(() => {});
     } else {
-      clearTimeout(loadTimer);
-      showError('浏览器格式限制', '当前环境未原生支持该视频格式，请点击下方外链在新窗口打开。', openUrl || url);
+      fail('浏览器格式限制', '当前环境未原生支持该视频格式，请点击下方外链在新窗口打开。');
     }
   } else if (url) {
+    // 网页型播放页（/embed/...）不做代理改写，直接按原地址内嵌
+    if (playLine === 'proxy' && proxyAvailable) showToast('该条目是网页播放页，仍按原地址加载');
     f.style.display = 'block';
     f.onload = () => {
       clearTimeout(loadTimer);
@@ -2047,6 +2293,13 @@ sourceSelect.onchange = e => {
   window.scrollTo({ top: 0, behavior: 'smooth' });
 };
 
+// 站点过滤下拉
+const siteSelect = document.getElementById('siteSelect');
+siteSelect.onchange = e => {
+  setSite(e.target.value);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+};
+
 // 每页条数设置
 const pageSizeSelect = document.getElementById('pageSizeSelect');
 pageSizeSelect.value = String(pageSize);
@@ -2063,7 +2316,20 @@ document.getElementById('btnReload').onclick = () => {
   loadWindow(true);
 };
 
+// 服务端能力：代理是否启用（-proxy 参数），决定“线路二”是否出现在播放器里
+async function loadServerConfig() {
+  try {
+    const res = await fetch('/api/status');
+    const j = await res.json();
+    setProxyAvailable(!!j.proxy);
+    renderSiteSelect(j.sites);
+  } catch (e) {
+    setProxyAvailable(false);
+  }
+}
+
 // 初次加载
+loadServerConfig();
 loadWindow();
 </script>
 </body>
