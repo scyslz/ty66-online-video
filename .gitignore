@@ -1,0 +1,13 @@
+# 编译产物
+/paresevideo
+/dist/
+
+# 运行时数据（id → 视频地址映射）
+/store.json
+/store.json.tmp
+
+# 旧 Python 版本与历史数据备份
+/backups/
+
+# 日志
+*.log
