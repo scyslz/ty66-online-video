@@ -994,7 +994,7 @@ main {
   .header-wrap { padding: 6px 12px; gap: 8px; }
   .header-meta { gap: 8px; }
   /* 窄屏时时间可能被截断，展开面板仍可看全 */
-  .header-sync { max-width: 96px; overflow: hidden; }
+  .header-sync { max-width: 150px; overflow: hidden; }
   #syncInfo { overflow: hidden; text-overflow: ellipsis; }
   .sync-panel { min-width: 200px; }
   main { padding: 8px 10px 30px; }
@@ -1639,17 +1639,29 @@ function setAppStatus(text, type = 'ready') {
 // 不显示「x 小时前」这类相对时间——旁边已经有绝对时间了，两个一起看反而乱。
 let siteSyncCache = [];
 
-// 紧凑时间：今天只给 HH:mm，更早给 MM-DD HH:mm。
+// 相对时间：用于顶栏收起态，如「3 小时前」，只表达"上次同步多久了"。
 function compactTime(ts) {
+  if (!ts) return '—';
+  const diff = Date.now() - ts * 1000;
+  if (diff < 0) return '刚刚';
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min} 分钟前`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} 小时前`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day} 天前`;
+  const d = new Date(ts * 1000);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// 完整时间：面板里展示每个站点的真实更新日期 YYYY-MM-DD HH:mm。
+function fullTime(ts) {
   if (!ts) return '—';
   const d = new Date(ts * 1000);
   const p = n => String(n).padStart(2, '0');
-  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
-  const now = new Date();
-  const sameDay = d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-  if (sameDay) return hm;
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
 function renderSyncInfo(siteSync) {
@@ -1695,7 +1707,7 @@ function renderSyncPanel() {
     html += `
       <div class="sync-row">
         <span class="sync-site">${esc(s.site || '-')}</span>
-        <span class="sync-when">${esc(compactTime(s.last_sync))} <span class="sync-note">${s.pages || 0} 页 ${s.items || 0} 条</span>${notes.length ? ' ' + notes.join(' ') : ''}</span>
+        <span class="sync-when">${esc(fullTime(s.last_sync))} <span class="sync-note">${s.pages || 0} 页 ${s.items || 0} 条</span>${notes.length ? ' ' + notes.join(' ') : ''}</span>
       </div>`;
   }
   panel.innerHTML = html;
