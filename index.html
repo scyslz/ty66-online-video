@@ -263,6 +263,37 @@ main {
   background: var(--viewed-bg);
 }
 
+/* 布局切换：网格 / 列表 */
+.layout-switch {
+  display: inline-flex;
+  align-items: center;
+  background: var(--btn-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+.layout-btn {
+  border: none;
+  background: transparent;
+  width: 26px;
+  height: 24px;
+  padding: 0;
+  color: var(--text-muted);
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.layout-btn svg { width: 13px; height: 13px; }
+.layout-btn:hover { color: var(--text); }
+.layout-btn.active {
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0,0,0,.08);
+}
+
 /* 搜索框 (严格统一 28px 高度，两端对称居中对齐) */
 .search-wrap {
   position: relative;
@@ -382,6 +413,42 @@ main {
 /* ============================================================== */
 /* 3. 极简卡片网格布局与已看进度条 (Progress Tracking)           */
 /* ============================================================== */
+
+/* 列表模式：一行一条，点击行直接播放 */
+.video-list { display: flex; flex-direction: column; gap: 4px; }
+.v-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 7px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  transition: var(--transition);
+  min-width: 0;
+}
+.v-row:hover { background: var(--card-hover); border-color: var(--border-hover); }
+.v-row.is-viewed { border-color: var(--viewed-border); background: var(--viewed-bg); }
+.v-row.is-viewed .v-row-title { color: var(--viewed-blue); }
+.v-row-title {
+  flex: 1 1 auto; min-width: 0;
+  font-size: 12px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.v-row-site, .v-row-dur, .v-row-progress {
+  flex: 0 0 auto; font-size: 10px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.v-row-dur { min-width: 36px; text-align: right; }
+.v-row-progress { color: var(--viewed-blue); }
+.v-row-ext {
+  flex: 0 0 auto; color: var(--text-dim); text-decoration: none;
+  padding: 3px 5px; border-radius: 4px; display: inline-flex; align-items: center;
+}
+.v-row-ext:hover { background: var(--btn-hover); color: var(--primary); }
+.v-row-ext svg { width: 12px; height: 12px; }
+
 .video-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
@@ -1116,6 +1183,14 @@ main {
       <button class="filter-btn btn-blue" data-filter="history">历史</button>
       <button class="filter-btn" data-filter="resolved">直链</button>
     </div>
+    <div class="layout-switch" id="layoutSwitch" title="切换列表布局">
+      <button class="layout-btn active" data-layout="grid" title="网格布局" aria-label="网格布局">
+        <svg viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      </button>
+      <button class="layout-btn" data-layout="list" title="列表布局" aria-label="列表布局">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+      </button>
+    </div>
 
     <!-- 搜索框、域名过滤与全局刷新 -->
     <div class="tool-group">
@@ -1563,6 +1638,15 @@ const PAGE_SIZE_KEY = 't66y_page_size_v1';
 const PAGE_SIZE_OPTIONS = [12, 24, 36, 48, 60];
 let pageSize = 24;              // 每页展示条数（用户可调）
 
+const LAYOUT_KEY = 't66y_layout_v1';
+let currentLayout = 'grid';    // grid | list
+(function loadLayout() {
+  try {
+    const v = localStorage.getItem(LAYOUT_KEY);
+    if (v === 'list' || v === 'grid') currentLayout = v;
+  } catch (e) {}
+})();
+
 (function loadPageSize() {
   try {
     const saved = parseInt(localStorage.getItem(PAGE_SIZE_KEY), 10);
@@ -1677,15 +1761,13 @@ function renderSyncInfo(siteSync) {
     return;
   }
 
-  // 一行显示：最近同步时间 · 总页数 · 总条数；异常时点亮琥珀色圆点。
-  let latest = 0, pages = 0, items = 0, warn = false;
+  // 外面只显示「上次同步多久了」；页数/条数在展开面板里看。
+  let latest = 0, warn = false;
   for (const s of siteSyncCache) {
     if (s.last_sync > latest) latest = s.last_sync;
-    pages += s.pages || 0;
-    items += s.items || 0;
     if ((s.breaker && s.breaker !== 'closed') || s.error) warn = true;
   }
-  text.textContent = `${compactTime(latest)} · ${pages} 页 ${items} 条`;
+  text.textContent = compactTime(latest);
   if (dot) dot.className = 'dot' + (warn ? ' loading' : '');
   renderSyncPanel();
 }
@@ -1933,6 +2015,44 @@ function render(refilling = false) {
     return;
   }
 
+  if (currentLayout === 'list') {
+    renderList(slice, historyView);
+  } else {
+    renderGrid(slice, historyView);
+  }
+}
+
+// 列表模式：一行一条，点击整行直接播放。
+function renderList(slice, historyView) {
+  let html = '<div class="video-list">';
+  for (let i = 0; i < slice.length; i++) {
+    const it = slice[i];
+    const url = it.play_url || it.play_page || it.redirect_url || '';
+    const openUrl = it.play_page || it.redirect_url || it.play_url || '';
+    const viewedData = ViewHistory.get(it);
+    const viewed = !!viewedData || !!it._t;
+    const progress = it.progress != null ? it.progress : (viewedData ? (viewedData.progress || 0) : 0);
+    const watchedAt = it._t || (viewedData ? viewedData.t : 0);
+    const metaLeft = historyView && watchedAt ? formatRelativeTime(watchedAt) : (it.source || getDomain(openUrl || url) || '-');
+    const progressText = viewed ? (progress >= 95 ? '已看完' : (progress > 0 ? `${progress}%` : '已看')) : '';
+
+    html += `
+      <div class="v-row ${viewed ? 'is-viewed' : ''}" onclick="onCardPlay(${i})" title="${escAttr(it.title || '')}">
+        <span class="v-row-title">${esc(it.title || '未知视频')}</span>
+        <span class="v-row-site">${esc(it.site || metaLeft)}</span>
+        ${progressText ? `<span class="v-row-progress">${progressText}</span>` : ''}
+        <span class="v-row-dur">${esc(it.duration || '')}</span>
+        <a href="${escAttr(openUrl || url)}" target="_blank" rel="noopener" class="v-row-ext" onclick="event.stopPropagation(); markViewed(${i});" title="新窗口打开">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+        </a>
+      </div>`;
+  }
+  html += '</div>';
+  document.getElementById('contentArea').innerHTML = html;
+}
+
+// 网格模式：卡片（原有布局）。
+function renderGrid(slice, historyView) {
   let html = '<div class="video-grid">';
   for (let i = 0; i < slice.length; i++) {
     const it = slice[i];
@@ -1991,7 +2111,7 @@ function render(refilling = false) {
       </div>`;
   }
   html += '</div>';
-  container.innerHTML = html;
+  document.getElementById('contentArea').innerHTML = html;
 }
 
 /**
@@ -2454,6 +2574,21 @@ window.addEventListener('keydown', e => {
  * 6. 事件绑定 (我们的极简分页与自动预拉取)
  * -------------------------------------------------------------
  */
+// 布局切换：网格 / 列表，记住选择。
+document.querySelectorAll('.layout-btn').forEach(btn => {
+  btn.onclick = () => {
+    const layout = btn.dataset.layout;
+    if (!layout || layout === currentLayout) return;
+    currentLayout = layout;
+    try { localStorage.setItem(LAYOUT_KEY, layout); } catch (e) {}
+    document.querySelectorAll('.layout-btn').forEach(b => b.classList.toggle('active', b === btn));
+    render();
+  };
+});
+// 初始化布局按钮高亮
+document.querySelectorAll('.layout-btn').forEach(b =>
+  b.classList.toggle('active', b.dataset.layout === currentLayout));
+
 document.querySelectorAll('.filter-btn').forEach(btn => {
   btn.onclick = () => {
     document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
