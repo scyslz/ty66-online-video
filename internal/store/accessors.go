@@ -131,11 +131,20 @@ type SiteSync struct {
 	Site        string `json:"site"`
 	LastSync    int64  `json:"last_sync"`    // 最近一次成功同步的 Unix 时间（0 表示还没成功过）
 	LastAttempt int64  `json:"last_attempt"` // 最近一次尝试的时间（含失败）
-	Pages       int    `json:"pages"`        // 已缓存的有内容的页数
-	Items       int    `json:"items"`        // 各页条目数之和（有重复，仅供参考）
-	Empty       bool   `json:"empty"`        // 已翻到站点末尾
-	Error       string `json:"error,omitempty"`
-	Breaker     string `json:"breaker,omitempty"` // closed / open / half-open
+	// Added 是最近一轮增量同步新增的条数，对应日志里的「更新 N 条」。
+	// 面板显示「最后更新新增 N 条」，比库存总量更能反映「这次更新了什么」。
+	Added int `json:"added"`
+
+	// Items 是该站点展示队列里的去重条数（真源是 orderQueue 链表）。
+	//
+	// 早期这里按 pages 里各页 ids 长度累加，但第 1 页每次刷新都会被新帖整体覆盖，
+	// 旧帖只是顺移到下游、pages 里的页快照并不会跟着重排，于是累计数既含重复、
+	// 又漏掉已掉出所有页的条目。既然展示顺序已经是去重链表，就直接按链表计数，
+	// 不再假装存在「稳定的页」，也不再对外提供页数。
+	Items   int    `json:"items"`
+	Empty   bool   `json:"empty"`        // 已翻到站点末尾
+	Error   string `json:"error,omitempty"`
+	Breaker string `json:"breaker,omitempty"` // closed / open / half-open
 }
 
 // SiteSyncs 汇总各站点的列表同步状态，用于「上游有没有更新」的观察。
@@ -164,16 +173,20 @@ func (s *Store) SiteSyncs() []SiteSync {
 			if ps.lastAttempt > row.LastAttempt {
 				row.LastAttempt = ps.lastAttempt / int64(time.Second)
 			}
-			if len(ps.ids) > 0 {
-				row.Pages++
-				row.Items += len(ps.ids)
-			}
 			if ps.empty {
 				row.Empty = true
 			}
 			row.Error = ps.lastErr
 		}
+		// 条数按展示队列（去重链表）统计，而不是各页 ids 之和。
+		// 这样新增只让旧条目在链表中后移，不会重复计数，也不需要「页跟着后移」。
+		row.Items = s.orderOfLocked(name).Len()
 		st := s.stateOfLocked(name)
+		row.Added = st.lastSyncAdded
+		// 有增量同步记录时，时间以那次更新为准，和 Added 保持同一口径。
+		if !st.lastSyncAt.IsZero() {
+			row.LastSync = st.lastSyncAt.Unix()
+		}
 		switch {
 		case st.cooling(now):
 			row.Breaker = "open"

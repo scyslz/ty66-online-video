@@ -31,6 +31,13 @@ type persisted struct {
 	Items   map[string]Item          `json:"items"`
 	// Order 是各站点的展示顺序（唯一真源）。缺失时按 pages 重建。
 	Order map[string][]string `json:"order,omitempty"`
+	// SiteStats 保存各站点最近一次增量同步的新增数与时间，重启后面板仍显示最后更新。
+	SiteStats map[string]persistedSiteStat `json:"site_stats,omitempty"`
+}
+
+type persistedSiteStat struct {
+	Added    int   `json:"added"`
+	SyncedAt int64 `json:"synced_at"`
 }
 
 type persistedPage struct {
@@ -143,6 +150,17 @@ func (s *Store) Load() error {
 			s.rebuildOrderLocked(name)
 		}
 	}
+	// 恢复各站点最后一次增量同步的新增数与时间。
+	for name, stat := range p.SiteStats {
+		if !sites[name] {
+			continue
+		}
+		st := s.stateOfLocked(name)
+		st.lastSyncAdded = stat.Added
+		if stat.SyncedAt > 0 {
+			st.lastSyncAt = time.Unix(stat.SyncedAt, 0)
+		}
+	}
 
 	n, np := len(s.items), len(s.pages)
 	s.mu.Unlock()
@@ -160,11 +178,12 @@ func (s *Store) Save() error {
 	defer s.saveMu.Unlock()
 
 	p := persisted{
-		Version: currentVersion,
-		SavedAt: time.Now().Unix(),
-		Pages:   make(map[string]persistedPage),
-		Items:   make(map[string]Item),
-		Order:   make(map[string][]string),
+		Version:   currentVersion,
+		SavedAt:   time.Now().Unix(),
+		Pages:     make(map[string]persistedPage),
+		Items:     make(map[string]Item),
+		Order:     make(map[string][]string),
+		SiteStats: make(map[string]persistedSiteStat),
 	}
 
 	s.mu.Lock()
@@ -183,6 +202,14 @@ func (s *Store) Save() error {
 	for name, q := range s.orders {
 		if keys := q.Snapshot(); len(keys) > 0 {
 			p.Order[name] = keys
+		}
+	}
+	for name, st := range s.siteStat {
+		if !st.lastSyncAt.IsZero() {
+			p.SiteStats[name] = persistedSiteStat{
+				Added:    st.lastSyncAdded,
+				SyncedAt: st.lastSyncAt.Unix(),
+			}
 		}
 	}
 	s.mu.Unlock()

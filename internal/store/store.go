@@ -107,6 +107,11 @@ type siteState struct {
 	openStreak    int       // 连续进入 open 的次数，用于指数退避
 	probeInFlight bool      // halfOpen 状态下是否已有试探请求在跑
 	lastErr       string
+
+	// lastSyncAdded / lastSyncAt 记录最近一轮增量同步新增的条数与时间。
+	// 供前端同步面板显示「最后更新新增 N 条」，不参与抓取逻辑。
+	lastSyncAdded int
+	lastSyncAt    time.Time
 }
 
 // 冷却时长：首次 30 分钟，之后指数退避，最长 6 小时。

@@ -1789,7 +1789,7 @@ function renderSyncPanel() {
     html += `
       <div class="sync-row">
         <span class="sync-site">${esc(s.site || '-')}</span>
-        <span class="sync-when">${esc(fullTime(s.last_sync))} <span class="sync-note">${s.pages || 0} 页 ${s.items || 0} 条</span>${notes.length ? ' ' + notes.join(' ') : ''}</span>
+        <span class="sync-when">${esc(fullTime(s.last_sync))} <span class="sync-note">新增 ${s.added || 0} 条</span>${notes.length ? ' ' + notes.join(' ') : ''}</span>
       </div>`;
   }
   panel.innerHTML = html;

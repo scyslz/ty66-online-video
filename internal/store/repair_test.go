@@ -273,11 +273,60 @@ func TestSiteSyncs(t *testing.T) {
 	if row.LastSync == 0 {
 		t.Error("同步成功后应有 last_sync")
 	}
-	if row.Pages != 1 || row.Items != 1 {
-		t.Errorf("页/条目数错误: pages=%d items=%d", row.Pages, row.Items)
+	// 条数按展示队列（去重链表）统计，不再按页快照累加。
+	if row.Items != 1 {
+		t.Errorf("条目数错误: items=%d，应为展示队列的 1 条", row.Items)
+	}
+	// SyncPageSite 是手动同步，不算增量轮，Added 应为 0。
+	if row.Added != 0 {
+		t.Errorf("手动同步不应计入增量新增数，added=%d", row.Added)
 	}
 	if row.Breaker != "closed" {
 		t.Errorf("正常站点熔断状态应为 closed，得到 %q", row.Breaker)
+	}
+}
+
+// 同一条目同时挂在多个页快照里时，展示队列只算一次，不能按页累加重复计数。
+func TestSiteSyncsItemsAreDeduplicated(t *testing.T) {
+	// 第 1 页与新帖：两页都包含 "shared"，页快照里它会被记两次。
+	p := newPageTracking("alpha", []string{"shared", "only1"}, []string{"shared", "only2"})
+	st := newTestStore(t, p)
+	st.SyncPageSite("alpha", 1, true)
+	st.SyncPageSite("alpha", 2, true)
+
+	rows := st.SiteSyncs()
+	if len(rows) != 1 {
+		t.Fatalf("应有 1 个站点的同步状态，得到 %d", len(rows))
+	}
+	if got := rows[0].Items; got != 3 {
+		t.Errorf("去重后应有 3 条（shared/only1/only2），items=%d", got)
+	}
+}
+
+// 增量同步后，面板应显示该轮真正新增的条数（对应日志「更新 N 条」）。
+func TestSiteSyncsAddedFromIncremental(t *testing.T) {
+	p := newPageTracking("alpha",
+		[]string{"a1", "a2"},
+		[]string{"b1", "b2"},
+	)
+	st := newSyncTestStore(t, p)
+
+	// 首轮增量：两页都是新条目，新增 4 条。
+	incremental(t, st, "alpha")
+	rows := st.SiteSyncs()
+	if len(rows) != 1 || rows[0].Added != 4 {
+		t.Fatalf("首轮增量新增应为 4，得到 %+v", rows)
+	}
+	if rows[0].LastSync == 0 {
+		t.Error("增量同步后 last_sync 应指向该轮更新时间")
+	}
+
+	// 上游第 1 页再插一条新帖：第二轮新增 1 条。
+	p.setPages([]string{"new", "a1", "a2"}, []string{"b1", "b2"})
+	incremental(t, st, "alpha")
+	rows = st.SiteSyncs()
+	if rows[0].Added != 1 {
+		t.Errorf("第二轮增量新增应为 1，得到 added=%d", rows[0].Added)
 	}
 }
 

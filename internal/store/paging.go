@@ -105,21 +105,42 @@ func (s *Store) readWindow(offset, limit int, source, site string) ([]Item, int)
 	return out, total
 }
 
+// normalizeTitle 去掉标题里的所有空白字符（空格、制表符等），用于跨站点比对。
+// 不同站点常常转载同一个视频：站点与 id 不同，但标题一致（可能只是空格多寡不同）。
+// 按规范化标题去重，可以让同一部片子在所有站点的汇总列表里只出现一次。
+func normalizeTitle(title string) string {
+	return strings.Join(strings.Fields(title), "")
+}
+
 // listedKeysLocked 按展示顺序返回键（site 为空表示所有站点）。
 //
 // 顺序的真源是每个站点的 orderQueue：站点按注册顺序拼接。
-// 队列本身就是去重的，所以这里不需要再去重。
+// 队列本身已按 itemKey 去重，这里再做一层「跨站点标题去重」：
+// 去掉空格后标题相同的条目只保留展示顺序最靠前的一条，空标题不参与去重。
 func (s *Store) listedKeysLocked(site string) []string {
 	sites := s.siteList(site)
 	out := make([]string, 0, len(s.items))
+	seenTitle := make(map[string]bool, len(s.items))
 	for _, name := range sites {
 		q, ok := s.orders[name]
 		if !ok {
 			continue
 		}
-		out = append(out, q.Keys(s.maxItems-len(out))...)
-		if len(out) >= s.maxItems {
-			break
+		for _, key := range q.Keys(0) {
+			it, ok := s.items[key]
+			if !ok {
+				continue
+			}
+			if title := normalizeTitle(it.Title); title != "" {
+				if seenTitle[title] {
+					continue
+				}
+				seenTitle[title] = true
+			}
+			out = append(out, key)
+			if len(out) >= s.maxItems {
+				return out
+			}
 		}
 	}
 	return out

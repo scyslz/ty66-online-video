@@ -153,6 +153,12 @@ func (s *Store) syncIncrementalSite(site string) {
 	}
 
 	if pages > 0 {
+		// 记录本轮新增数，供同步面板展示「最后一次更新新增 N 条」。
+		s.mu.Lock()
+		st := s.stateOfLocked(site)
+		st.lastSyncAdded = added
+		st.lastSyncAt = time.Now()
+		s.mu.Unlock()
 		log.Printf("[List] %s 更新 %d 页 %d 条", site, pages, added)
 	}
 }

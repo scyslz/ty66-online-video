@@ -193,6 +193,48 @@ func TestLoadLegacyFile(t *testing.T) {
 	}
 }
 
+// 两个站点标题相同（仅空格不同）时，只保留展示顺序靠前的一条。
+func TestCrossSiteTitleDedup(t *testing.T) {
+	a := &fakeProvider{name: "alpha", pages: map[int][]provider.Item{1: {
+		{ID: "1", Title: "同一 视频", ThreadURL: "https://alpha.example/1"},
+		{ID: "2", Title: "仅 alpha", ThreadURL: "https://alpha.example/2"},
+	}}, exhaustive: true}
+	b := &fakeProvider{name: "beta", pages: map[int][]provider.Item{1: {
+		{ID: "9", Title: "同一视频", ThreadURL: "https://beta.example/9"},
+		{ID: "8", Title: "同一　视频", ThreadURL: "https://beta.example/8"},
+		{ID: "7", Title: "仅 beta", ThreadURL: "https://beta.example/7"},
+	}}, exhaustive: true}
+	st := newTestStore(t, a, b)
+
+	st.SyncPageSite("alpha", 1, true)
+	st.SyncPageSite("beta", 1, true)
+
+	// 底层映射仍保留全部条目，去重只发生在展示/读取层。
+	if got := st.ItemCount(); got != 5 {
+		t.Fatalf("映射应保留全部 5 条，实际 %d", got)
+	}
+
+	win := st.FillWindowQuery(0, 100, "", "")
+	if win.Total != 3 {
+		t.Fatalf("按标题去重后窗口应为 3 条，实际 %d", win.Total)
+	}
+	got := map[string]string{}
+	for _, it := range win.Items {
+		got[it.Site] += it.ID + ","
+	}
+	if got["alpha"] != "1,2," {
+		t.Errorf("alpha 应保留全部条目（先展示），实际 %q", got["alpha"])
+	}
+	if got["beta"] != "7," {
+		t.Errorf("beta 只应保留标题不同的 7，实际 %q", got["beta"])
+	}
+	for _, it := range win.Items {
+		if it.ID == "8" || it.ID == "9" {
+			t.Errorf("重复标题的 beta 条目不应展示: %+v", it)
+		}
+	}
+}
+
 // splitKey / pageKey 的往返。
 func TestKeyHelpers(t *testing.T) {
 	if k := itemKey("t66y", "123"); k != "t66y:123" {
