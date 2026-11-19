@@ -614,3 +614,48 @@ func TestFilteredSiteShortNeverTouchesOthers(t *testing.T) {
 		t.Errorf("beta 到末尾后不应反复抓第 3 页，实际 %d 次", c)
 	}
 }
+
+// 关键字搜索：只查已缓存数据，不触发补页；按标题/来源做不区分大小写的子串匹配。
+func TestFillWindowSearch(t *testing.T) {
+	p := newPageProvider("alpha", 3, 0)
+	st := newPageStore(t, p)
+
+	// 先同步几页数据：alpha 第1~3页标题为 "alpha 第N页"
+	for i := 0; i < 3; i++ {
+		st.RequestNextPage("alpha")
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && st.pendingPageCount() > 0 {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	before := p.count(1) + p.count(2) + p.count(3)
+
+	// 命中第 2 页标题
+	win := st.FillWindowSearch(0, 24, "", "", "第2页")
+	if win.Total != 1 {
+		t.Fatalf("搜索 '第2页' 应命中 1 条，得到 %d", win.Total)
+	}
+	if len(win.Items) != 1 || win.Items[0].Title != "alpha 第2页" {
+		t.Fatalf("搜索结果不对: %+v", win.Items)
+	}
+
+	// 不区分大小写
+	win = st.FillWindowSearch(0, 24, "", "", "ALPHA")
+	if win.Total != 3 {
+		t.Fatalf("搜索 'ALPHA' 应命中 3 条，得到 %d", win.Total)
+	}
+
+	// 无命中
+	win = st.FillWindowSearch(0, 24, "", "", "不存在的词")
+	if win.Total != 0 || len(win.Items) != 0 {
+		t.Fatalf("无命中应返回 0 条，得到 total=%d items=%d", win.Total, len(win.Items))
+	}
+
+	// 搜索不应触发上游补页（即使结果不足一页）
+	if after := p.count(1) + p.count(2) + p.count(3); after != before {
+		t.Errorf("搜索不应触发补页，抓取次数从 %d 变成 %d", before, after)
+	}
+	if win.Loading || win.HasMore {
+		t.Error("搜索结果不应带 loading / has_more 标志")
+	}
+}

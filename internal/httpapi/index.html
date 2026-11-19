@@ -1846,6 +1846,7 @@ async function fetchWindow(isRefresh = false, keepData = false) {
     let url = `/api/scrape?offset=${offset}&limit=${pageSize}`;
     if (currentSource) url += `&source=${encodeURIComponent(currentSource)}`;
     if (currentSite) url += `&site=${encodeURIComponent(currentSite)}`;
+    if (searchQuery.trim()) url += `&q=${encodeURIComponent(searchQuery.trim())}`;
     if (isRefresh) url += '&refresh=1';
 
     const res = await fetch(url);
@@ -1960,9 +1961,11 @@ function isHistoryView() {
 
 function getProcessedData() {
   // 历史视图：直接读本地历史并按最近观看时间倒序
+  // 非历史视图：关键字过滤已由后端 /api/scrape 的 q 参数完成，allData 已是过滤后的当前窗口
   let list = isHistoryView() ? ViewHistory.list() : allData.slice();
 
-  if (searchQuery.trim()) {
+  // 历史数据来自本地，仍按关键字在前端过滤
+  if (isHistoryView() && searchQuery.trim()) {
     const q = searchQuery.trim().toLowerCase();
     list = list.filter(it => {
       const t = (it.title || '').toLowerCase();
@@ -2604,6 +2607,9 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
       currentSource = '';
     } else {
       sourceSel.disabled = false;
+      // 离开历史视图回到列表视图时，重新从后端取数（带上当前搜索词）
+      loadWindow();
+      return;
     }
     render();
   };
@@ -2620,7 +2626,12 @@ searchInput.addEventListener('input', e => {
   searchTimer = setTimeout(() => {
     searchQuery = val;
     ourPage = 1;
-    render();
+    // 历史视图数据全在本地，直接重绘即可；其它视图走后端关键字搜索
+    if (isHistoryView()) {
+      render();
+    } else {
+      loadWindow();
+    }
   }, 160);
 });
 
@@ -2629,7 +2640,11 @@ searchClear.onclick = () => {
   searchClear.style.display = 'none';
   searchQuery = '';
   ourPage = 1;
-  render();
+  if (isHistoryView()) {
+    render();
+  } else {
+    loadWindow();
+  }
 };
 
 // 分页事件：统一走 goToPage，不再涉及上游页码

@@ -49,7 +49,7 @@ func (s *Server) Routes() http.Handler {
 // handleScrape 返回按条数窗口切片的列表。
 //
 // 参数：offset（默认 0）、limit（默认 24，最大 500）、source（按来源域名过滤）、
-// site（按站点过滤，多站部署时用）；
+// site（按站点过滤，多站部署时用）、q（按关键字搜索标题与来源域名，不区分大小写）；
 // refresh=1 强制先同步第一页。兼容旧参数 page：换算为 offset=(page-1)*24。
 func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
@@ -68,12 +68,13 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 
 	source := store.NormalizeSource(query.Get("source"))
 	site := strings.TrimSpace(query.Get("site"))
+	q := strings.TrimSpace(query.Get("q"))
 
-	if query.Get("refresh") == "1" {
+	if q == "" && query.Get("refresh") == "1" {
 		s.Store.RequestSyncSite(site, 1)
 	}
 
-	win := s.Store.FillWindowQuery(offset, limit, source, site)
+	win := s.Store.FillWindowSearch(offset, limit, source, site, q)
 	items := win.Items
 	if items == nil {
 		items = []store.Item{}
@@ -84,6 +85,7 @@ func (s *Server) handleScrape(w http.ResponseWriter, r *http.Request) {
 		"limit":   limit,
 		"source":  source,
 		"site":    site,
+		"q":       q,
 		"total":   win.Total,
 		"count":   len(items),
 		"items":   items,

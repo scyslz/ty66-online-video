@@ -43,19 +43,30 @@ func (s *Store) FillWindowSource(offset, limit int, source string) Window {
 }
 
 // FillWindowQuery 读取窗口，可按来源域名与站点过滤。
-//
-// 只读缓存：数据不足时立即返回已有内容，并把补页请求投给后台。
 func (s *Store) FillWindowQuery(offset, limit int, source, site string) Window {
+	return s.fillWindowQuery(offset, limit, source, site, "")
+}
+
+// FillWindowSearch 读取窗口，可按来源域名、站点与关键字过滤。
+//
+// 关键字对标题与来源域名做不区分大小写的子串匹配。搜索只针对当前已缓存的数据，
+// 不会为了凑满窗口而向上游补页——否则用户每敲一个字都可能触发抓取。
+func (s *Store) FillWindowSearch(offset, limit int, source, site, query string) Window {
+	return s.fillWindowQuery(offset, limit, source, site, query)
+}
+
+func (s *Store) fillWindowQuery(offset, limit int, source, site, query string) Window {
 	offset = max(offset, 0)
 	if limit < 1 {
 		limit = 24
 	}
 	limit = min(limit, MaxWindowSize)
 
-	items, total := s.readWindow(offset, limit, source, site)
+	items, total := s.readWindowQuery(offset, limit, source, site, query)
 
 	need := offset + limit
-	short := total < need
+	// 搜索时不触发补页：只查缓存，避免每次输入都惊动上游。
+	short := query == "" && total < need
 	pending := false
 	if short {
 		// 缓存不够：对每个未到末尾的站点并发补一页。
@@ -72,15 +83,21 @@ func (s *Store) FillWindowQuery(offset, limit int, source, site string) Window {
 		Total:   total,
 		Pending: s.pendingCount(items),
 		Loading: short && pending,
-		HasMore: s.HasMore(site),
+		HasMore: query == "" && s.HasMore(site),
 	}
 }
 
 // readWindow 从缓存里读出 [offset, offset+limit)，并返回过滤后的总数。
 func (s *Store) readWindow(offset, limit int, source, site string) ([]Item, int) {
+	return s.readWindowQuery(offset, limit, source, site, "")
+}
+
+// readWindowQuery 从缓存里读出窗口，可按来源、站点、关键字过滤，并返回过滤后的总数。
+func (s *Store) readWindowQuery(offset, limit int, source, site, query string) ([]Item, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	q := strings.ToLower(strings.TrimSpace(query))
 	keys := s.listedKeysLocked(site)
 	out := make([]Item, 0, limit)
 	total := 0
@@ -90,6 +107,11 @@ func (s *Store) readWindow(offset, limit int, source, site string) ([]Item, int)
 			continue
 		}
 		if source != "" && !SameSource(it.Source, source) {
+			continue
+		}
+		if q != "" &&
+			!strings.Contains(strings.ToLower(it.Title), q) &&
+			!strings.Contains(strings.ToLower(it.Source), q) {
 			continue
 		}
 		idx := total
